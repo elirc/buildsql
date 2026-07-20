@@ -99,8 +99,15 @@ class Plan:
         return "\n".join(lines)
 
 
-def explain(conn, query: str, params=None, analyze: bool = True) -> Plan:
-    opts = "ANALYZE, BUFFERS, FORMAT JSON" if analyze else "FORMAT JSON"
+def explain(conn, query: str, params=None, analyze: bool = True,
+            timing: bool = True) -> Plan:
+    """timing=False keeps per-node clocks off - use it when measuring speed,
+    since per-row instrumentation inflates row-heavy plans."""
+    if analyze:
+        opts = "ANALYZE, BUFFERS, FORMAT JSON" if timing else \
+            "ANALYZE, TIMING OFF, FORMAT JSON"
+    else:
+        opts = "FORMAT JSON"
     cur = conn.execute(f"EXPLAIN ({opts}) {query}", params)
     (doc,) = cur.fetchone()
     return Plan(doc[0])

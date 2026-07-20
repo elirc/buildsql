@@ -10,12 +10,16 @@ BASELINE_PATH = ROOT / "data" / "baseline.json"
 
 
 def measure_execution_ms(conn, query: str, repeats: int = 5, warmup: int = 1) -> float:
-    """Best-of-N EXPLAIN ANALYZE execution time, after warmup runs."""
+    """Best-of-N EXPLAIN ANALYZE execution time, after warmup runs.
+
+    Measured with TIMING OFF: per-node clocks add per-row overhead that
+    unfairly penalizes plans flowing many rows.
+    """
     for _ in range(warmup):
-        explain(conn, query)
+        explain(conn, query, timing=False)
     best = float("inf")
     for _ in range(repeats):
-        p = explain(conn, query)
+        p = explain(conn, query, timing=False)
         t = p.execution_time_ms
         if t is not None and t < best:
             best = t

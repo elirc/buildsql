@@ -6,24 +6,24 @@ which of them you use. Completing this lesson completes the course.
 
 ## Exercise 1 — make the dashboard fast
 
-`ex1/solution.sql` (provided) is the CFO's landing-page query:
+`ex1/solution.sql` (provided) is the CFO's landing-page chart: paid
+revenue per day, first week of October:
 
 ```sql
-SELECT c.country, count(*) AS orders, sum(o.total) AS revenue
+SELECT date_trunc('day', o.created_at) AS day,
+       count(*) AS orders, sum(o.total) AS revenue
 FROM orders o
-JOIN customers c ON c.id = o.customer_id
 WHERE o.status = 'paid'
   AND o.created_at >= '2023-10-01'
-  AND o.created_at <  '2023-11-01'
-GROUP BY c.country;
+  AND o.created_at <  '2023-10-08'
+GROUP BY 1;
 ```
 
 Edit `ex1/indexes.sql` — anything you can justify. Gate: correct rows,
-**no Seq Scan on `orders`** (the customers side may do as the planner
-pleases — lesson 37 taught you why), and **≥5x**. Think before typing:
-which predicates? equality or range? is a partial index honest here
-(lesson 39)? could covering columns buy an index-only scan (34)?
-Several designs pass; measure two and keep notes like a professional.
+**no Seq Scan on `orders`**, and **≥5x**. Think before typing: which
+predicates? equality or range? is a partial index honest here (lesson
+39)? could covering columns buy an index-only scan (34)? Several
+designs pass; measure two and keep notes like a professional.
 
 Run: `uv run dojo test 47_capstone ex1`
 

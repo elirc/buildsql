@@ -1,2 +1,3 @@
--- 43_gist_brin/ex2: write your query here (see README.md)
-SELECT 1;
+-- 43_gist_brin/ex2: create both indexes in indexes.sql, then
+-- copy the size-comparison query from the README below.
+SELECT 'todo';

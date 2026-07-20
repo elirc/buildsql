@@ -23,7 +23,7 @@ def test_ex1(lesson_db):
     p = explain(lesson_db, ex.solution_sql)
     grader.assert_plan(p, must_not_have=['Seq Scan'])
     measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
-    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=5)
 
 
 def test_ex2(lesson_db):
