@@ -1,0 +1,1 @@
+-- 34_index_only_scans/ex2: your CREATE INDEX here (use INCLUDE)

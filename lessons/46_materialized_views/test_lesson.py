@@ -1,0 +1,38 @@
+"""Gates for 46_materialized_views. Quoted verbatim in README.md."""
+from dojo import grader, timing
+from dojo.lesson import Lesson
+
+L = Lesson(__file__)
+
+PROBE = "SELECT category, revenue FROM category_rev"
+
+
+def test_ex1(lesson_db):
+    ex = L.exercise("ex1")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex1",
+                                      ex.expected_sql)
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    actual = ex.fetch(lesson_db, PROBE)
+    grader.assert_rows_equal(actual, expected)
+    measured = timing.measure_execution_ms(lesson_db, PROBE)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex2(lesson_db):
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    lesson_db.commit()
+    ex = L.exercise("ex2")
+
+    # the world changes AFTER the materialized view was built
+    lesson_db.execute(
+        "INSERT INTO order_items (id, order_id, product_id, quantity, price) "
+        "SELECT 5000000 + gs, 123, 1, 3, 100.00 FROM generate_series(1, 50) gs")
+    lesson_db.commit()
+
+    fresh = lesson_db.execute(L.exercise("ex1").expected_sql).fetchall()
+    lesson_db.execute(ex.solution_sql)   # must REFRESH
+    lesson_db.commit()
+    actual = ex.fetch(lesson_db, PROBE)
+    grader.assert_rows_equal(actual, fresh)

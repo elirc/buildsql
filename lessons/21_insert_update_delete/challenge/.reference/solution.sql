@@ -1,0 +1,9 @@
+INSERT INTO orders (id, customer_id, status, total, created_at)
+SELECT 600001, customer_id, 'pending', total, '2023-11-15'
+FROM orders
+WHERE id = 123;
+
+INSERT INTO order_items (id, order_id, product_id, quantity, price)
+SELECT id + 1000000, 600001, product_id, quantity, price
+FROM order_items
+WHERE order_id = 123;

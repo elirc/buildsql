@@ -1,0 +1,1 @@
+ANALYZE hot_orders;

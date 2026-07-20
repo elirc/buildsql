@@ -1,0 +1,1 @@
+-- 31_first_index/challenge: your CREATE INDEX here

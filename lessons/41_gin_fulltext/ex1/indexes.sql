@@ -1,0 +1,1 @@
+-- 41_gin_fulltext/ex1: your GIN index here (takes ~a minute to build)

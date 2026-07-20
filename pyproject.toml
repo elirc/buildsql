@@ -1,0 +1,33 @@
+[project]
+name = "sql-dojo"
+version = "0.1.0"
+description = "SQL Dojo - a self-directed, pytest-graded PostgreSQL course"
+requires-python = ">=3.11"
+dependencies = [
+    "psycopg[binary]>=3.1",
+    "faker>=24.0",
+    "python-dotenv>=1.0",
+    "rich>=13",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+dojo = "dojo.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["dojo"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "lessons"]
+python_files = ["test_*.py", "test_lesson.py"]
+addopts = "-ra --import-mode=importlib"
+markers = [
+    "challenge: optional harder exercise, excluded from core progress",
+    "review: spaced-review variant, run via `dojo review`",
+]

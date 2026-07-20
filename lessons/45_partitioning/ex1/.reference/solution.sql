@@ -1,0 +1,9 @@
+CREATE TABLE events_p (LIKE events) PARTITION BY RANGE (ts);
+
+CREATE TABLE events_p_oct PARTITION OF events_p
+  FOR VALUES FROM ('2023-10-01') TO ('2023-11-01');
+
+CREATE TABLE events_p_nov PARTITION OF events_p
+  FOR VALUES FROM ('2023-11-01') TO ('2023-12-01');
+
+INSERT INTO events_p SELECT * FROM events;

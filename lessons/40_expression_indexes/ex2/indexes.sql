@@ -1,0 +1,1 @@
+-- 40_expression_indexes/ex2: your CREATE INDEX here

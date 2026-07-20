@@ -1,0 +1,4 @@
+SELECT id, ts
+FROM events
+ORDER BY ts DESC
+LIMIT 10;
