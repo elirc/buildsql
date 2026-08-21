@@ -73,6 +73,83 @@ def test_ex3(lesson_db):
         total - doomed, "exactly the doomed reviews were deleted - no more, no less")
 
 
+def test_ex4(lesson_db):
+    target = lesson_db.execute(
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country = 'JP' AND o.status = 'pending'").fetchone()[0]
+    cancelled_before = lesson_db.execute(
+        "SELECT count(*) FROM orders WHERE status = 'cancelled'").fetchone()[0]
+    other_pending = lesson_db.execute(
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country <> 'JP' AND o.status = 'pending'").fetchone()[0]
+    assert target > 0  # the seed guarantees Japanese pending orders exist
+
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country = 'JP' AND o.status = 'pending'",
+        0, "no pending Japanese orders remain")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM orders WHERE status = 'cancelled'",
+        cancelled_before + target,
+        "exactly the Japanese pending orders became cancelled - no more, no less")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country <> 'JP' AND o.status = 'pending'",
+        other_pending, "every other country's pending orders are untouched")
+
+
+def test_ex5(lesson_db):
+    doomed_sql = (
+        "SELECT count(*) FROM reviews r JOIN products p ON p.id = r.product_id "
+        "WHERE p.category = 'garden' AND p.id < 100 AND r.rating = 1")
+    doomed = lesson_db.execute(doomed_sql).fetchone()[0]
+    total = lesson_db.execute("SELECT count(*) FROM reviews").fetchone()[0]
+    assert doomed > 0  # the seed guarantees such reviews exist
+
+    ex = L.exercise("ex5")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    grader.assert_scalar(lesson_db, doomed_sql, 0,
+                         "the targeted 1-star garden reviews are gone")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM reviews", total - doomed,
+        "exactly the targeted reviews were deleted - no more, no less")
+
+
+def test_ex6(lesson_db):
+    ex = L.exercise("ex6")
+    before = lesson_db.execute("SELECT count(*) FROM products").fetchone()[0]
+
+    returned = ex.fetch(lesson_db, ex.solution_sql)
+    lesson_db.commit()
+
+    assert len(returned) == 3, (
+        "RETURNING MISSING OR WRONG: the gate reads the result set your "
+        f"statement produced and got {len(returned)} row(s), expected 3.\n"
+        "  Add `RETURNING id, name, price` to your UPDATE."
+    )
+    assert all(len(r) == 3 for r in returned), (
+        "RETURNING should hand back three columns: id, name, price."
+    )
+    assert {r[0] for r in returned} == {11, 22, 33}, (
+        f"RETURNING gave ids {sorted(r[0] for r in returned)}, expected 11, 22, 33."
+    )
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM products WHERE id IN (11, 22, 33) "
+                   "AND price = 9.99",
+        3, "all three products are now priced 9.99")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM products", before,
+        "an UPDATE must not change the number of rows")
+
+
 @pytest.mark.challenge
 def test_challenge(lesson_db):
     src = lesson_db.execute(

@@ -34,3 +34,31 @@ def test_ex2(lesson_db):
     grader.assert_rows_equal(actual, expected)
     p = explain(lesson_db, ex.solution_sql)
     grader.assert_plan(p, must_have=["Hash Join"])
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_have=['Nested Loop'], must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_have=['Nested Loop'], must_not_have=[])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)

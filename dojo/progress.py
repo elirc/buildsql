@@ -82,6 +82,18 @@ def record_hint(exercise_id: str, tier: int) -> None:
     save(data)
 
 
+def record_reading(exercise_id: str) -> None:
+    """Count an opened reading. Unlike hints, this is a number to be proud of."""
+    if disabled():
+        return
+    data = load()
+    ex = data["exercises"].setdefault(
+        exercise_id, {"attempts": 0, "passed_at": None, "hints_used": 0}
+    )
+    ex["readings_opened"] = ex.get("readings_opened", 0) + 1
+    save(data)
+
+
 def passed(data: dict, exercise_id: str) -> bool:
     return bool(data["exercises"].get(exercise_id, {}).get("passed_at"))
 

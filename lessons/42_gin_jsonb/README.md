@@ -65,6 +65,69 @@ home game.
 
 Run: `uv run dojo test 42_gin_jsonb ex2`
 
+## Exercise 3 — two keys at once
+
+`ex3/solution.sql` (provided) finds a specific variant:
+
+```sql
+SELECT id, name
+FROM products
+WHERE attributes @> '{"color": "red", "size": "xl"}';
+```
+
+Edit `ex3/indexes.sql` with a GIN index on the whole `attributes` column.
+
+One containment test, two keys, one index — and note what you did *not*
+have to do: name the keys when creating the index. A GIN index over a JSONB
+column indexes every key and value in every document, so it serves
+containment queries for combinations nobody anticipated. That generality is
+its entire selling point over lesson 40's expression index, which serves
+exactly one expression and nothing else.
+
+The price is size and write cost: a GIN index over a document column is
+typically several times larger than a B-tree over one extracted key.
+
+This gate checks your rows and that the index exists — it does **not**
+demand a particular plan, and that is deliberate. `products` has only ten
+thousand rows, and on a table that small a sequential scan is often the
+cheapest plan even with a perfect index available. Insisting on an index
+scan here would be asserting a fact about the table's size rather than about
+your index. Exercise 4 makes the same point on three million rows, where the
+planner has no such luxury.
+
+Run: `uv run dojo test 42_gin_jsonb ex3`
+
+## Exercise 4 — the smaller operator class
+
+`ex4/solution.sql` (provided) searches three million clickstream
+payloads:
+
+```sql
+SELECT id, ts
+FROM events
+WHERE payload @> '{"value": 999}';
+```
+
+Edit `ex4/indexes.sql` and build the GIN index with the
+**`jsonb_path_ops`** operator class:
+
+```sql
+CREATE INDEX ... ON events USING gin (payload jsonb_path_ops);
+```
+
+The default operator class, `jsonb_ops`, indexes every key *and* every
+value separately, which lets it serve key-existence operators (`?`, `?|`,
+`?&`) as well as containment. `jsonb_path_ops` indexes only hashes of
+complete paths — so it supports `@>` and nothing else, and in exchange it
+is substantially smaller and often faster for the containment queries that
+are most of what anyone actually runs.
+
+Choosing an operator class is the most PostgreSQL-specific thing in Part 5,
+and the principle generalises: an index is a data structure plus a set of
+operators it can answer. Match both to your query.
+
+Run: `uv run dojo test 42_gin_jsonb ex4`
+
 ## The gate
 
 ```python
@@ -75,7 +138,7 @@ against this machine's own cached baseline (data/baseline.json).
 """
 import pytest
 
-from dojo import db, grader, timing
+from dojo import catalog, db, grader, timing
 from dojo.lesson import Lesson
 from dojo.plan import explain
 
@@ -100,6 +163,32 @@ def test_ex2(lesson_db):
     ex = L.exercise("ex2")
     expected = ex.fetch(lesson_db, ex.expected_sql)
     baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex2",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex3(lesson_db):
+    """Rows and index only. `products` is small enough that a sequential scan
+    is a legitimate plan here, so asserting one shape would be asserting a
+    fact about the table size rather than about your index."""
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    catalog.assert_index(lesson_db, "products", ["attributes"])
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
                                       ex.expected_sql)
     ex.apply_indexes(lesson_db)
     actual = ex.fetch(lesson_db, ex.solution_sql)

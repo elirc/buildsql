@@ -59,6 +59,57 @@ def test_ex2(lesson_db):
         0, "new product 200 registered with stock 0")
 
 
+def test_ex3(lesson_db):
+    L.apply_setup(lesson_db)
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    first_run = _snapshot(lesson_db, "inventory")
+
+    lesson_db.execute(ex.solution_sql)  # run it AGAIN
+    lesson_db.commit()
+    grader.assert_rows_equal(_snapshot(lesson_db, "inventory"), first_run,
+                             ordered=True)
+
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 70",
+        100, "product 70: 80 is lower than 100, so the row must NOT change")
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 80",
+        120, "product 80: 120 beats 100, so it updates")
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 250",
+        5, "product 250 is new, so it inserts")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM inventory",
+        101, "exactly one new row appeared")
+
+
+def test_ex4(lesson_db):
+    L.apply_setup(lesson_db)
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    first_run = _snapshot(lesson_db, "inventory")
+
+    lesson_db.execute(ex.solution_sql)  # run it AGAIN
+    lesson_db.commit()
+    grader.assert_rows_equal(_snapshot(lesson_db, "inventory"), first_run,
+                             ordered=True)
+
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM inventory WHERE product_id BETWEEN 95 AND 105 "
+        "AND stock = 50",
+        11, "all eleven products 95-105 hold stock 50")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM inventory",
+        105, "five new rows appeared (101-105) and no others")
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 1",
+        100, "products outside the range are untouched")
+
+
 @pytest.mark.challenge
 def test_challenge(lesson_db):
     L.apply_setup(lesson_db)

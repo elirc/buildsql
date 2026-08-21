@@ -43,6 +43,59 @@ none (expects the full balance — not NULL, not a missing row).
 
 Run: `uv run dojo test 29_design_capstone ex2`
 
+## Exercise 3 — the usage report
+
+> *"While you're in there — Ops also wants to see how often each card gets
+> used, not just what's left on it. Cards nobody has touched should show
+> up as zero, obviously."*
+
+Edit `ex3/solution.sql`. Create view **`gift_card_usage`** with three
+columns:
+
+- `gift_card_id`
+- `redemptions` — how many redemption rows the card has (**0**, not NULL,
+  for a card nobody has redeemed)
+- `used` — the total amount redeemed (**0**, not NULL, for the same cards)
+
+Your ex1 schema is created first automatically.
+
+"Obviously" is the requester doing what requesters do. The trap is the same
+one ex2 sprang, arriving twice in one view: a `LEFT JOIN` is needed so
+untouched cards survive, `count(r.id)` rather than `count(*)` so they count
+zero, and `coalesce(sum(...), 0)` because `sum` over no rows is NULL rather
+than zero. Three lessons — 06, 09 and 27 — converging on one view.
+
+Run: `uv run dojo test 29_design_capstone ex3`
+
+## Exercise 4 — the batch they were printed in
+
+> *"Last thing. The cards get printed in batches and we need to know which
+> batch a card came from — sometimes a whole batch gets recalled. If we
+> delete a batch record the cards themselves must survive; they're
+> physically out there in people's wallets."*
+
+Edit `ex4/solution.sql`. Two statements:
+
+1. create `gift_card_batches` — `id` int primary key, `printed_on` date
+   NOT NULL;
+2. `ALTER TABLE gift_cards` to add a `batch_id` column referencing it,
+   **`ON DELETE SET NULL`**.
+
+Your ex1 schema is created first automatically.
+
+The last sentence of the request is the spec for the delete policy, and it
+rules out the other two options: `CASCADE` would destroy real gift cards
+because a filing record was tidied away, and `RESTRICT` would make it
+impossible to remove a batch record at all. `SET NULL` says "the card
+outlives its paperwork", which is exactly what the requester described
+without knowing there was a decision to make.
+
+Note that `batch_id` must be **nullable** — both because `SET NULL`
+requires it and because every card that already exists has no batch. That
+is lesson 28's shape: add nullable, and never lock the table.
+
+Run: `uv run dojo test 29_design_capstone ex4`
+
 ## The gate
 
 ```python
@@ -123,6 +176,71 @@ def test_ex2(lesson_db):
         "SELECT remaining FROM gift_card_balances WHERE gift_card_id = 11",
         40, "a card with NO redemptions shows its full balance - "
             "if this is NULL or missing, revisit lessons 09 and 27")
+
+
+def test_ex3(lesson_db):
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_view(lesson_db, "gift_card_usage")
+
+    lesson_db.execute(
+        "INSERT INTO gift_cards (id, code, initial_balance) "
+        "VALUES (901, 'GC-USED', 100.00), (902, 'GC-UNUSED', 50.00)")
+    order_id = lesson_db.execute("SELECT id FROM orders LIMIT 1").fetchone()[0]
+    lesson_db.execute(
+        "INSERT INTO gift_card_redemptions (id, gift_card_id, order_id, amount) "
+        f"VALUES (901, 901, {order_id}, 30.00), (902, 901, {order_id}, 20.00)")
+
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT redemptions FROM gift_card_usage WHERE gift_card_id = 901",
+        2, "the used card has two redemptions")
+    grader.assert_scalar(
+        lesson_db, "SELECT used FROM gift_card_usage WHERE gift_card_id = 901",
+        50, "30.00 + 20.00")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM gift_card_usage WHERE gift_card_id = 902",
+        1, "the untouched card must still appear - LEFT JOIN, not INNER")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT redemptions FROM gift_card_usage WHERE gift_card_id = 902",
+        0, "zero redemptions, not 1 - count(r.id), not count(*)")
+    grader.assert_scalar(
+        lesson_db, "SELECT used FROM gift_card_usage WHERE gift_card_id = 902",
+        0, "zero used, not NULL - sum over no rows needs a coalesce")
+
+
+def test_ex4(lesson_db):
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_table(lesson_db, "gift_card_batches", {
+        "id": "int", "printed_on": "date"})
+    catalog.assert_pk(lesson_db, "gift_card_batches", ["id"])
+    catalog.assert_not_null(lesson_db, "gift_card_batches", "printed_on")
+    catalog.assert_table(lesson_db, "gift_cards", {"batch_id": "int"})
+    catalog.assert_fk(lesson_db, "gift_cards", ["batch_id"],
+                      "gift_card_batches", on_delete="SET NULL")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO gift_cards (id, code, initial_balance, batch_id) "
+        "VALUES (911, 'GC-GHOST', 10.00, 4242)",
+        why="a card printed in a batch that does not exist")
+    # behavioural proof: the card outlives its batch record
+    lesson_db.execute(
+        "INSERT INTO gift_card_batches (id, printed_on) VALUES (1, '2023-11-14')")
+    lesson_db.execute(
+        "INSERT INTO gift_cards (id, code, initial_balance, batch_id) "
+        "VALUES (912, 'GC-BATCHED', 25.00, 1)")
+    lesson_db.execute("DELETE FROM gift_card_batches WHERE id = 1")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM gift_cards WHERE id = 912",
+        1, "the card survives - it is in somebody's wallet")
+    grader.assert_scalar(
+        lesson_db, "SELECT batch_id FROM gift_cards WHERE id = 912",
+        None, "and its batch_id went to NULL rather than taking the card with it")
 ```
 
 ## The teaching point

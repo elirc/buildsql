@@ -1,7 +1,7 @@
 """Gates for 36_statistics_and_the_planner. Quoted verbatim in README.md."""
 import pytest
 
-from dojo import grader
+from dojo import grader, timing
 from dojo.lesson import Lesson
 from dojo.plan import explain
 
@@ -48,3 +48,37 @@ def test_ex2(lesson_db):
                        "SELECT id, total FROM hot_orders WHERE status IN "
                        "('paid', 'pending', 'shipped', 'cancelled')")
     grader.assert_plan(p_common, must_have=["Seq Scan"])
+
+
+def test_ex3(lesson_db):
+    L.apply_setup(lesson_db)
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT a.attstattarget FROM pg_attribute a "
+        "JOIN pg_class c ON c.oid = a.attrelid "
+        "WHERE c.relname = 'hot_orders' AND a.attname = 'status'",
+        1000, "the per-column statistics target is recorded in the catalog")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) > 0 FROM pg_stats "
+        "WHERE tablename = 'hot_orders' AND attname = 'status'",
+        True, "statistics exist - the ALTER does nothing until you ANALYZE")
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    L.apply_setup(lesson_db)
+    lesson_db.execute("ANALYZE hot_orders")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)

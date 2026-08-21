@@ -62,6 +62,60 @@ uses a Hash Join — the right tool, un-"optimized".
 
 Run: `uv run dojo test 37_join_algorithms ex2`
 
+## Exercise 3 — a nested loop worth having
+
+`ex3/solution.sql` (provided) fetches one product's reviews with the
+product's name attached:
+
+```sql
+SELECT r.id, r.rating, p.name
+FROM reviews r
+JOIN products p ON p.id = r.product_id
+WHERE r.product_id = 42;
+```
+
+Edit `ex3/indexes.sql`. The gate requires a **`Nested Loop`** in the plan
+and the usual 8×.
+
+A nested loop is right when the driving side is tiny and the inner side has
+an index: for each of the ~100 matching reviews, look up one product by
+primary key. Its cost is `outer_rows × inner_lookup`, which is excellent at
+100 outer rows and catastrophic at 500,000 — the same algorithm, two
+completely different verdicts, decided entirely by the row-count estimate
+from lesson 36.
+
+Your index only has to make the *driving* side small; `products` already
+has a primary-key index for the inner lookup.
+
+Run: `uv run dojo test 37_join_algorithms ex3`
+
+## Exercise 4 — change the row count, change the algorithm
+
+`ex4/solution.sql` (provided) attaches customer names to the very
+largest orders:
+
+```sql
+SELECT o.id, o.total, c.name
+FROM orders o
+JOIN customers c ON c.id = o.customer_id
+WHERE o.total > 1999.50;
+```
+
+Edit `ex4/indexes.sql`. The gate requires a **`Nested Loop`**.
+
+Without an index the planner has to read all 500,000 orders, so it builds a
+hash table of `customers` and streams them past it — a `Hash Join`, and the
+right call. Index `orders.total` and the driving side collapses to roughly a
+hundred rows, at which point looking each customer up by primary key is far
+cheaper than hashing 50,000 of them.
+
+You did not change the query, the join, or the tables. You changed *how
+many rows the planner expects*, and it changed algorithms by itself. That
+is the lesson: you do not choose join algorithms, you choose the row counts
+that make one obviously best.
+
+Run: `uv run dojo test 37_join_algorithms ex4`
+
 ## The gate
 
 ```python
@@ -101,6 +155,34 @@ def test_ex2(lesson_db):
     grader.assert_rows_equal(actual, expected)
     p = explain(lesson_db, ex.solution_sql)
     grader.assert_plan(p, must_have=["Hash Join"])
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_have=['Nested Loop'], must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_have=['Nested Loop'], must_not_have=[])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
 ```
 
 ## The teaching point

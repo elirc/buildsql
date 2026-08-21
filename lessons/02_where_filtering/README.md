@@ -60,6 +60,52 @@ Columns: `id`, `name`. Row order doesn't matter.
 
 Run: `uv run dojo test 02_where_filtering ex3`
 
+## Exercise 4 — IN and BETWEEN together
+
+Edit `ex4/solution.sql`. The gift-guide editor wants **mid-priced toys and
+garden products**: every product whose `category` is either `'toys'` or
+`'garden'`, and whose `price` is between 100 and 150 **inclusive**.
+
+Columns, in order: `id`, `name`, `category`, `price`. Row order doesn't
+matter.
+
+Write the category test with `IN` and the price test with `BETWEEN` — both
+are shorthand you will read in other people's SQL constantly, and both are
+worth being able to write without hesitating.
+
+Run: `uv run dojo test 02_where_filtering ex4`
+
+## Exercise 5 — negation done right
+
+Edit `ex5/solution.sql`. Accounting is chasing tiny orders that were never
+cancelled: every order whose `status` is **not** `'cancelled'` and whose
+`total` is **under 10**.
+
+Columns: `id`, `status`, `total`. Row order doesn't matter.
+
+Write the negation with `<>` (or `NOT`, or `NOT IN` — all three work here).
+Look at the statuses that come back and satisfy yourself that all three
+survivors are present. This query is safe today for a reason you cannot yet
+see: `orders.status` is `NOT NULL`. Lesson 05 shows you the same query on a
+nullable column, where it silently loses rows.
+
+Run: `uv run dojo test 02_where_filtering ex5`
+
+## Exercise 6 — case matters (until it doesn't)
+
+Edit `ex6/solution.sql`. Marketing wants a shortlist: customers in the
+**US, GB, or DE** whose `name` begins with a capital **A**, matched
+**case-sensitively**.
+
+Columns: `id`, `name`, `country`. Row order doesn't matter.
+
+Use `LIKE` (not `ILIKE`) so the capital letter is enforced, and `IN` for the
+country list. Run the same query with `ILIKE` in the lab afterwards and note
+whether the row count changes — on this dataset it should not, and knowing
+*why* your two queries agree is worth more than the row count itself.
+
+Run: `uv run dojo test 02_where_filtering ex6`
+
 ## Challenge — fix the precedence bug (optional)
 
 A colleague wrote this query, meaning to get *pending or paid* orders over
@@ -109,6 +155,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

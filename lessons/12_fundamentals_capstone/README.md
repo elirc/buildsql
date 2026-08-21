@@ -47,6 +47,61 @@ Filter orders to status paid or shipped. Any row order. (Three tables:
 
 Run: `uv run dojo test 12_fundamentals_capstone ex3`
 
+## Exercise 4 — "Did our Q3 signups convert?"
+
+> *From: Growth. "We spent a lot acquiring people in Q3. How many of them
+> never actually bought anything? Give me the list, I want to email them."*
+
+Edit `ex4/solution.sql`. Customers whose **`created_at` falls in Q3 2023**
+(same half-open range as above) and who have **never** placed an order at
+all — not "no orders in Q3", none ever. Read that sentence twice; it is the
+kind of distinction the requester did not realise they were making.
+
+Columns: `id`, `name`. Any row order.
+
+Two lessons compose: a date range on `customers`, and an anti-join to
+`orders`. Any of the three anti-join idioms is fine.
+
+Run: `uv run dojo test 12_fundamentals_capstone ex4`
+
+## Exercise 5 — "Show me the trend, not the total"
+
+> *From: CFO, again. "The quarterly number is fine but I can't see the
+> shape. Give me paid revenue by month for calendar 2023, in order, with
+> the order counts next to it."*
+
+Edit `ex5/solution.sql`. For **paid** orders created in calendar year 2023
+(`>= '2023-01-01'` and `< '2024-01-01'`), one row per calendar month.
+
+Columns in this order: `month` (the month truncated with
+`date_trunc('month', created_at)`), `orders` (count), `revenue` (sum of
+`total`). **Ordered by month ascending.**
+
+Expect 11 rows, not 12 — the data stops on 2023-11-14. A trend report that
+silently ends early is a reporting bug you should be able to *see* coming;
+this is what a partial period looks like.
+
+Run: `uv run dojo test 12_fundamentals_capstone ex5`
+
+## Exercise 6 — "What were our five best sellers in Q3?"
+
+> *From: Merchandising. "Top five products by units sold last quarter —
+> real orders only, same definition as before. Name and category."*
+
+Edit `ex6/solution.sql`. Across `orders` → `order_items` → `products`, for
+orders whose `status` is `'paid'` or `'shipped'` **and** whose `created_at`
+falls in Q3 2023, return the five products with the most units sold.
+
+Columns in this order: `id` (the product's), `name`, `category`, `units`
+(sum of `quantity`). **Ordered by `units` descending, tie-broken by `id`
+ascending, exactly 5 rows.**
+
+"Same definition as before" is the requester assuming you remember what
+they meant by *real orders* in exercise 2 and 3. They will not always be
+this consistent — write the definition down where the query can be read.
+
+Run: `uv run dojo test 12_fundamentals_capstone ex6`
+
 ## Spaced review
 
 `review1/`: revenue per customer country for **paid** orders in Q3 2023 —
@@ -83,6 +138,27 @@ def test_ex3(shared_lesson_db):
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
 
 
 @pytest.mark.review

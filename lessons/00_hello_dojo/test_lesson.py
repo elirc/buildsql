@@ -17,3 +17,17 @@ def test_ex2(shared_lesson_db):
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)

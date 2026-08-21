@@ -63,6 +63,54 @@ snapshot; product prices can change). Two columns, six rows, any order.
 
 Run: `uv run dojo test 08_inner_joins ex3`
 
+## Exercise 4 — reputation per category
+
+Edit `ex4/solution.sql`. Which categories do customers actually *like*?
+Join `reviews` to `products` and return, per category, the category name,
+the average `rating` rounded to 2 decimals, and the number of reviews.
+
+Three columns in that order, six rows, any order.
+
+Same shape as exercise 3 — join, then group by a column of the *other*
+table — on a different pair of tables. The join key is
+`reviews.product_id = products.id`; get into the habit of writing the ON
+clause before anything else in the query.
+
+Run: `uv run dojo test 08_inner_joins ex4`
+
+## Exercise 5 — filtering across the join
+
+Edit `ex5/solution.sql`. The returns team is auditing **bulk purchases of
+expensive electronics**: every order line whose product is in the
+`electronics` category, where the line's `quantity` is exactly 5 **and**
+the line's `price` is above 480.
+
+Columns, in this order: the line's `id`, the product's `name`, the line's
+`quantity`, the line's `price`. Any row order.
+
+Two of those conditions are about `order_items` and one is about
+`products`, but all three go in the `WHERE` clause — for an **inner** join
+it makes no difference where a filter lives. Remember that sentence,
+because lesson 09 is about the case where it stops being true.
+
+Run: `uv run dojo test 08_inner_joins ex5`
+
+## Exercise 6 — revenue by country
+
+Edit `ex6/solution.sql`. The board wants revenue by market. Join `orders`
+to `customers` and return, per `country`, the country code and the sum of
+the orders' `total`.
+
+Two columns in that order, twelve rows, any order.
+
+Half a million orders joined to fifty thousand customers and folded into
+twelve numbers. Run `dojo plan 08_inner_joins ex6` when it passes and look
+at what PostgreSQL chose: almost certainly a **Hash Join** — it builds a
+hash table of the smaller table (`customers`) and streams the larger one
+past it. Lesson 37 explains when it picks that over the alternatives.
+
+Run: `uv run dojo test 08_inner_joins ex6`
+
 ## Challenge — the five-table drill-down (optional)
 
 Edit `challenge/solution.sql`. Customer service pulled up **customer
@@ -122,6 +170,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

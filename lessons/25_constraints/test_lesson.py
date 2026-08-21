@@ -96,6 +96,97 @@ def test_ex3(lesson_db):
         "INSERT INTO newsletter_subs (id, email) VALUES (1, 'a@b.example')")
 
 
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_table(lesson_db, "promo_codes", {
+        "id": "int", "campaign": "text", "code": "text",
+        "percent_off": "numeric"})
+    catalog.assert_pk(lesson_db, "promo_codes", ["id"])
+    catalog.assert_unique(lesson_db, "promo_codes", ["campaign", "code"])
+    catalog.assert_not_null(lesson_db, "promo_codes", "campaign")
+    catalog.assert_check(lesson_db, "promo_codes", "percent_off")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO promo_codes (id, campaign, code, percent_off) "
+        "VALUES (1, 'spring', 'SAVE10', 0)",
+        why="a 0% discount is not a discount")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO promo_codes (id, campaign, code, percent_off) "
+        "VALUES (1, 'spring', 'SAVE10', 101)",
+        why="more than 100% off means paying the customer")
+    lesson_db.execute("SAVEPOINT scope_probe")
+    lesson_db.execute(
+        "INSERT INTO promo_codes (id, campaign, code, percent_off) "
+        "VALUES (1, 'spring', 'SAVE10', 10)")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO promo_codes (id, campaign, code, percent_off) "
+        "VALUES (2, 'spring', 'SAVE10', 20)",
+        why="the same code twice in one campaign is a duplicate")
+    catalog.accepts(
+        lesson_db,
+        "INSERT INTO promo_codes (id, campaign, code, percent_off) "
+        "VALUES (3, 'autumn', 'SAVE10', 10)",
+        why="the same code in a DIFFERENT campaign must be allowed")
+    lesson_db.execute("ROLLBACK TO SAVEPOINT scope_probe")
+
+
+def test_ex5(lesson_db):
+    ex = L.exercise("ex5")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_table(lesson_db, "campaigns", {"id": "int", "name": "text"})
+    catalog.assert_table(lesson_db, "campaign_items", {
+        "id": "int", "campaign_id": "int", "product_id": "int"})
+    catalog.assert_pk(lesson_db, "campaign_items", ["id"])
+    catalog.assert_fk(lesson_db, "campaign_items", ["campaign_id"], "campaigns",
+                      on_delete="SET NULL")
+    catalog.assert_fk(lesson_db, "campaign_items", ["product_id"], "products")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO campaign_items (id, campaign_id, product_id) "
+        "VALUES (1, 999, 1)",
+        why="a campaign item pointing at a campaign that does not exist")
+    # behavioural proof of ON DELETE SET NULL
+    lesson_db.execute("INSERT INTO campaigns (id, name) VALUES (1, 'spring')")
+    lesson_db.execute(
+        "INSERT INTO campaign_items (id, campaign_id, product_id) VALUES (1, 1, 5)")
+    lesson_db.execute("DELETE FROM campaigns WHERE id = 1")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM campaign_items WHERE id = 1",
+        1, "the item survives its campaign - SET NULL, not CASCADE")
+    grader.assert_scalar(
+        lesson_db, "SELECT campaign_id FROM campaign_items WHERE id = 1",
+        None, "and its campaign_id was set to NULL")
+
+
+def test_ex6(lesson_db):
+    ex = L.exercise("ex6")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_table(lesson_db, "bookings", {
+        "id": "int", "room": "text", "starts_on": "date", "ends_on": "date"})
+    catalog.assert_pk(lesson_db, "bookings", ["id"])
+    catalog.assert_not_null(lesson_db, "bookings", "starts_on")
+    catalog.assert_not_null(lesson_db, "bookings", "ends_on")
+    catalog.assert_check(lesson_db, "bookings", "ends_on")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO bookings (id, room, starts_on, ends_on) "
+        "VALUES (1, 'dojo', '2023-11-10', '2023-11-01')",
+        why="a booking that ends before it starts")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO bookings (id, room, starts_on, ends_on) "
+        "VALUES (1, 'dojo', '2023-11-10', '2023-11-10')",
+        why="zero-length bookings - the CHECK must be strict, not >=")
+    catalog.accepts(
+        lesson_db,
+        "INSERT INTO bookings (id, room, starts_on, ends_on) "
+        "VALUES (1, 'dojo', '2023-11-10', '2023-11-12')",
+        why="an ordinary two-day booking")
+
+
 @pytest.mark.challenge
 def test_challenge(lesson_db):
     ex = L.exercise("challenge")

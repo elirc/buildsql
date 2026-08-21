@@ -42,6 +42,56 @@ def _hint_sections(text: str) -> list[str]:
     return re.findall(r"^## Hint \d+", text, flags=re.M)
 
 
+MIN_READING_LINKS = 3
+# A floor that catches empty/TODO sections without forcing prose to be padded.
+MIN_SECTION_WORDS = 25
+
+
+def lint_reading(spec: curriculum.LessonSpec, ldir: Path) -> list[str]:
+    """Every lesson owes the learner theory notes and links, per exercise."""
+    from dojo import reading as reading_mod
+
+    errors: list[str] = []
+    path = ldir / "reading.md"
+    if not path.exists():
+        return ["reading.md missing (theory notes + further reading)"]
+    doc = reading_mod.parse(path.read_text(encoding="utf-8"), spec.slug, path)
+
+    if doc.notes is None:
+        errors.append("reading.md has no '## Notes' section")
+    elif len(doc.notes.body.split()) < MIN_SECTION_WORDS:
+        errors.append(
+            f"reading.md '## Notes' is only {len(doc.notes.body.split())} words "
+            f"(need >= {MIN_SECTION_WORDS})"
+        )
+
+    further = doc.further_reading
+    if further is None:
+        errors.append("reading.md has no '## Further reading' section")
+    else:
+        n = len(re.findall(r"\[[^\]]+\]\(https?://[^)\s]+\)", further.body))
+        if n < MIN_READING_LINKS:
+            errors.append(
+                f"reading.md '## Further reading' has {n} link(s) "
+                f"(need >= {MIN_READING_LINKS})"
+            )
+
+    have = set(doc.exercise_keys())
+    for d in spec.exercise_dirs():
+        if d not in have:
+            errors.append(f"reading.md has no '## {d}' section")
+        else:
+            section = doc.get(d)
+            if len(section.body.split()) < MIN_SECTION_WORDS:
+                errors.append(
+                    f"reading.md '## {d}' is only {len(section.body.split())} words "
+                    f"(need >= {MIN_SECTION_WORDS})"
+                )
+    for extra in sorted(have - set(spec.exercise_dirs())):
+        errors.append(f"reading.md section '## {extra}' has no manifest exercise")
+    return errors
+
+
 def lint_lesson(spec: curriculum.LessonSpec) -> list[str]:
     errors: list[str] = []
     ldir = ROOT / "lessons" / spec.slug
@@ -73,6 +123,8 @@ def lint_lesson(spec: curriculum.LessonSpec) -> list[str]:
     for f in sorted(test_funcs - expected_funcs):
         errors.append(f"test function {f} has no manifest exercise")
 
+    errors += lint_reading(spec, ldir)
+
     for d in sorted(manifest_dirs & actual_dirs):
         exd = ldir / d
         hints = exd / "hints.md"
@@ -96,7 +148,7 @@ def lint_lesson(spec: curriculum.LessonSpec) -> list[str]:
 
 def _run_pytest(tmp: Path, slug: str) -> tuple[int, int, int, str]:
     """Run the lesson's tests in tmp; return (exit_code, passed, failed, output)."""
-    env = dict(os.environ, DOJO_NO_PROGRESS="1")
+    env = dict(os.environ, DOJO_NO_PROGRESS="1", DOJO_NO_READING="1")
     proc = subprocess.run(
         [sys.executable, "-m", "pytest",
          f"lessons/{slug}/test_lesson.py",

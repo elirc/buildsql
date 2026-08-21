@@ -62,6 +62,51 @@ the wasted work on this 3M-row table.
 
 Run: `uv run dojo test 32_composite_indexes ex2`
 
+## Exercise 3 — two equalities on the line items
+
+`ex3/solution.sql` (provided):
+
+```sql
+SELECT id, order_id, price
+FROM order_items
+WHERE product_id = 42 AND quantity = 3;
+```
+
+Edit `ex3/indexes.sql` with **one** composite index serving both
+conditions.
+
+Two equality conditions, so either column order works for *this* query —
+`(product_id, quantity)` and `(quantity, product_id)` both find the rows.
+They are not equally good, though: `quantity` has five distinct values
+across a million rows, so leading with it means the tree narrows to
+200,000 entries before the second column does any work. Lead with the
+selective column.
+
+Run: `uv run dojo test 32_composite_indexes ex3`
+
+## Exercise 4 — equality first, range second
+
+`ex4/solution.sql` (provided):
+
+```sql
+SELECT id, rating, created_at
+FROM reviews
+WHERE product_id = 42 AND rating >= 4;
+```
+
+Edit `ex4/indexes.sql` with one composite index.
+
+Here the column order is **not** a matter of taste. A B-tree is sorted by
+the first column, then the second within equal firsts, and so on — so once
+you use a column for a *range*, everything after it is no longer in a
+usable order. Equality columns first, range column last. Put `rating`
+first and the index can only narrow to "rating 4 or 5", then scan 400,000
+entries looking for the product.
+
+This one rule explains most composite-index design in practice.
+
+Run: `uv run dojo test 32_composite_indexes ex4`
+
 ## The gate
 
 ```python
@@ -97,6 +142,34 @@ def test_ex2(lesson_db):
     ex = L.exercise("ex2")
     expected = ex.fetch(lesson_db, ex.expected_sql)
     baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex2",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
                                       ex.expected_sql)
     ex.apply_indexes(lesson_db)
     actual = ex.fetch(lesson_db, ex.solution_sql)

@@ -54,6 +54,45 @@ four filtered counts — not four queries.
 
 Run: `uv run dojo test 06_aggregates ex2`
 
+## Exercise 3 — count(*) is not count(column)
+
+Edit `ex3/solution.sql`. HR wants a one-row summary of the company. Five
+columns, in this order:
+
+1. the number of staff rows
+2. the number of staff who **have** a manager
+3. the average `salary`, rounded to 2 decimals
+4. the highest `salary`
+5. the earliest `hired_on` date
+
+From `staff`. One row.
+
+Columns 1 and 2 differ by exactly one, and the difference is the entire
+point: `count(*)` counts **rows**, `count(manager_id)` counts **non-NULL
+values of that column**. Both are spelled `count`. Neither warns you which
+one you meant.
+
+Run: `uv run dojo test 06_aggregates ex3`
+
+## Exercise 4 — counting distinct things
+
+Edit `ex4/solution.sql`. The weekly ops report needs three numbers about
+`orders`, in this order:
+
+1. how many orders there are
+2. how many **distinct customers** placed them
+3. how many **distinct statuses** appear
+
+One row, three columns.
+
+`count(DISTINCT col)` deduplicates before counting. It is the honest way to
+answer "how many customers?" from a table of orders — and it is much more
+expensive than `count(*)`, because PostgreSQL must remember every value it
+has seen. You wrote the same question as `SELECT DISTINCT customer_id` back
+in lesson 01; this collapses it to a single number.
+
+Run: `uv run dojo test 06_aggregates ex4`
+
 ## Challenge — the all-hands KPI row (optional)
 
 Edit `challenge/solution.sql`. Leadership wants one row with four numbers
@@ -96,6 +135,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

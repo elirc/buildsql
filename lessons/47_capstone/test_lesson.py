@@ -35,13 +35,14 @@ def test_ex1(lesson_db):
 
 
 def test_ex2(lesson_db):
+    existing = lesson_db.execute("SELECT count(*) FROM orders").fetchone()[0]
     ex = L.exercise("ex2")
     lesson_db.execute(ex.solution_sql)
     catalog.assert_table(lesson_db, "orders", {"channel": "text"})
     catalog.assert_not_null(lesson_db, "orders", "channel")
     grader.assert_scalar(
         lesson_db, "SELECT count(*) FROM orders WHERE channel = 'web'",
-        500000, "every existing order backfilled to 'web'")
+        existing, "every existing order backfilled to 'web'")
     grader.assert_scalar(
         lesson_db,
         "SELECT convalidated FROM pg_constraint WHERE conname = 'orders_channel_ck'",
@@ -65,3 +66,48 @@ def test_ex3(lesson_db):
     _no_seq_scan_on(p, {"orders", "order_items"})
     measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
     grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=["Seq Scan", "Sort"])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex5(lesson_db):
+    ex = L.exercise("ex5")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    catalog.assert_table(lesson_db, "products", {"sku": "text"})
+    catalog.assert_not_null(lesson_db, "products", "sku")
+    catalog.assert_unique(lesson_db, "products", ["sku"])
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM pg_class WHERE relname = 'products_sku_key'",
+        1, "the unique index is named products_sku_key")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM products "
+        "WHERE sku <> upper(left(category, 3)) || '-' || id::text",
+        0, "every SKU is computed from that product's own category and id")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO products (id, name, category, price, description, "
+        "attributes, sku) SELECT 99001, 'Probe', 'books', 1.00, 'x', "
+        "'{}'::jsonb, sku FROM products WHERE id = 1",
+        why="two products may not share a SKU")
+
+
+def test_ex6(lesson_db):
+    ex = L.exercise("ex6")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)

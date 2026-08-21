@@ -52,6 +52,39 @@ finance staff → 1,830 pairs.)
 
 Run: `uv run dojo test 10_self_joins_hierarchies ex2`
 
+## Exercise 3 — the org chart with nobody missing
+
+Edit `ex3/solution.sql`. Exercise 1 produced 499 rows for a 500-person
+company, and that is a bug in most reports. Produce the version HR can
+actually publish: **every** staff member with their manager's name, and
+the CEO listed too — with a NULL where a manager would be.
+
+Columns: `employee` (their name), `manager` (the manager's name, NULL for
+the CEO). All 500 rows, any order.
+
+Two lessons stack here. `staff` still joins to itself under two aliases,
+but the join has to be a `LEFT JOIN` from the employee hat to the manager
+hat, because the CEO's `manager_id` is NULL and NULL matches nothing.
+
+Run: `uv run dojo test 10_self_joins_hierarchies ex3`
+
+## Exercise 4 — two levels up
+
+Edit `ex4/solution.sql`. The skip-level meeting tool needs three names per
+row: an employee, their manager, and their **manager's manager**.
+
+Columns, in this order: `employee`, `manager`, `grandmanager` — all three
+being names. Only rows where all three exist (a plain inner join at both
+steps). Any row order.
+
+The same table now wears three hats. Notice what this costs: one more
+level of hierarchy means one more join, written by hand, and a query that
+only works for *exactly* that depth. "Everyone under the VP of Sales,
+however deep" cannot be written this way at all — which is precisely the
+argument for the recursive CTE waiting in lesson 14.
+
+Run: `uv run dojo test 10_self_joins_hierarchies ex4`
+
 ## Challenge — paid more than the boss (optional)
 
 Edit `challenge/solution.sql`. The awkward report: employees who earn
@@ -89,6 +122,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

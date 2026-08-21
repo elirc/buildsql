@@ -1,0 +1,1 @@
+-- 42_gin_jsonb/ex3: your CREATE INDEX here (see README.md)

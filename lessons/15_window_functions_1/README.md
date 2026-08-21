@@ -69,6 +69,61 @@ a CTE, filter `rn <= 5` outside. Feel how much better this is.
 
 Run: `uv run dojo test 15_window_functions_1 ex3`
 
+## Exercise 4 — rank versus dense_rank, side by side
+
+Edit `ex4/solution.sql`. Put the three numbering functions' difference in
+front of your eyes. For all 500 staff return `name`, `salary`, `rnk`
+(`rank()` over salary descending) and `drnk` (`dense_rank()` over the same
+order). **Ordered by `salary` descending, then `id` ascending.**
+
+Four columns, 500 rows, order graded.
+
+Scroll to the first tie in the output. `rank()` gives both tied rows the
+same number and then *skips* — 1, 1, 3. `dense_rank()` gives them the same
+number and carries on — 1, 1, 2. Neither is more correct; they answer
+different questions ("what position did they finish?" versus "how many
+distinct salary levels are above them?"), and picking the wrong one puts a
+visibly wrong number on a leaderboard.
+
+Run: `uv run dojo test 15_window_functions_1 ex4`
+
+## Exercise 5 — how far from the category average?
+
+Edit `ex5/solution.sql`. Merchandising wants every product scored against
+its own category: `id`, `name`, `category`, and **`vs_category`** — the
+product's price minus its category's average price, rounded to 2 decimals.
+Negative means cheaper than its category's average.
+
+Four columns, all 10,000 rows, any order.
+
+Exercise 2 attached the category average; this subtracts it, which is the
+form a human can actually read. One window function does it with no join,
+no `GROUP BY`, and no subquery — compare that against lesson 13's review
+exercise, which asked the same *kind* of question with a correlated scalar
+subquery and re-derived the average once per row.
+
+Run: `uv run dojo test 15_window_functions_1 ex5`
+
+## Exercise 6 — the latest row per group
+
+Edit `ex6/solution.sql`. For every customer with `id <= 50`, their **most
+recent order**. Columns: `customer_id`, `id` (the order's), `created_at`.
+Any row order.
+
+This is lesson 13's correlated-`max()` challenge rewritten as the ranked-CTE
+idiom: `row_number()` partitioned by customer, ordered by `created_at`
+descending (tie-break `id` descending), filtered to `rn = 1` outside the
+CTE.
+
+The idiom generalises to almost every "latest / best / first per group"
+question there is — latest event per device, best offer per product, first
+touch per campaign. Learn the shape, not the example. Note also what the
+tie-break buys you: the correlated-`max()` version returns *both* rows when
+two orders share a timestamp, while `row_number()` picks exactly one, every
+time.
+
+Run: `uv run dojo test 15_window_functions_1 ex6`
+
 ## Challenge — departmental podium (optional)
 
 Edit `challenge/solution.sql`. The top 3 salaries **per department** —
@@ -115,6 +170,27 @@ def test_ex3(shared_lesson_db):
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
 
 
 @pytest.mark.challenge

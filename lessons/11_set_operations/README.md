@@ -44,6 +44,42 @@ NULL trap? Because EXCEPT compares NULLs as equal instead of unknown.)
 
 Run: `uv run dojo test 11_set_operations ex2`
 
+## Exercise 3 — in both lists
+
+Edit `ex3/solution.sql`. Marketing wants the overlap between two segments:
+customers who are **in the US** *and* have placed **at least one order
+over 1900**.
+
+One deduplicated column, `id`, any order.
+
+`INTERSECT` keeps the rows that appear in both results. Note that you could
+also write this as a join — and for two lists of ids, `INTERSECT` says
+exactly what you mean with no join key to get wrong, no risk of the
+many-to-many fan-out that would duplicate a customer with three big orders,
+and automatic deduplication. Try the join version in the lab and count the
+rows before you dedupe; the difference is the argument for the set
+operator.
+
+Run: `uv run dojo test 11_set_operations ex3`
+
+## Exercise 4 — UNION ALL, and the duplicates it keeps
+
+Edit `ex4/solution.sql`. Build a raw contact list for two campaigns,
+**keeping every duplicate**: every `customer_id` from orders with `total >
+1995`, stacked with `UNION ALL` onto every `id` from customers in
+`'AU'`.
+
+One column, any order, duplicates preserved.
+
+Then run the same query with plain `UNION` in the lab and compare the row
+counts. Two effects are mixed into that difference: a customer with three
+enormous orders appears three times in the first half alone, and an
+Australian customer with a big order appears in both halves. `UNION` erases
+both — sometimes that is the fix and sometimes it is the bug, and only you
+know which.
+
+Run: `uv run dojo test 11_set_operations ex4`
+
 ## Challenge — symmetric difference (optional)
 
 Edit `challenge/solution.sql`. Marketing has two segments: **A** =
@@ -83,6 +119,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

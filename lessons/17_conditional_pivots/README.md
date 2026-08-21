@@ -59,6 +59,46 @@ signups span 2021–2023, so the two columns don't sum to the total.)
 
 Run: `uv run dojo test 17_conditional_pivots ex2`
 
+## Exercise 3 — salary bands per department
+
+Edit `ex3/solution.sql`. HR wants a compensation grid: one row per
+`department`, with a **count** of staff in each of three salary bands.
+
+Columns, in this order: `department`, `under_60k` (salary below 60,000),
+`mid` (60,000 up to but not including 100,000), `over_100k` (100,000 and
+above). Five rows, any order.
+
+Note what changes when the aggregate is `count` rather than `sum`: an empty
+band shows **0**, not NULL, because `count` over zero rows is defined as
+zero while every other aggregate returns NULL. That asymmetry is the reason
+a `sum(...) FILTER (...)` pivot usually needs a `coalesce` and a
+`count(*) FILTER (...)` pivot never does.
+
+Run: `uv run dojo test 17_conditional_pivots ex3`
+
+## Exercise 4 — each group's share of the whole
+
+Edit `ex4/solution.sql`. The order-status breakdown with percentages: one
+row per `status`, with the order count and that status's **share of all
+orders** as a percentage rounded to 1 decimal.
+
+Columns, in this order: `status`, `orders` (count), `pct`. Four rows, any
+order. The four percentages should add to 100.
+
+The denominator is the trick. You need the grand total *while* grouping,
+and the tool is a window function layered on top of an aggregate:
+
+```sql
+round(100.0 * count(*) / sum(count(*)) OVER (), 1) AS pct
+```
+
+`sum(count(*)) OVER ()` reads strangely and is exactly right: aggregation
+happens first, producing four rows, and the window then sums across those
+four. Windows are evaluated *after* grouping, so a window function may take
+an aggregate as its argument — but not the other way round.
+
+Run: `uv run dojo test 17_conditional_pivots ex4`
+
 ## Challenge — unpivot it back (optional)
 
 Edit `challenge/solution.sql`. Take ex1's wide grid (rebuild it in a CTE)
@@ -94,6 +134,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

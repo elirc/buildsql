@@ -66,6 +66,50 @@ order doesn't matter.
 
 Run: `uv run dojo test 01_select_basics ex3`
 
+## Exercise 4 — DISTINCT on a big table
+
+Edit `ex4/solution.sql`. Support asks: **which customers have ever placed
+an order?** Return one column, `customer_id`, from `orders`, each id
+exactly once. Row order doesn't matter.
+
+There are 500,000 orders and far fewer distinct customers among them, so
+this is the first query where `DISTINCT` has to do real work — PostgreSQL
+must either sort or hash 500,000 values to find the unique ones. Note the
+row count it returns and compare it with the 50,000 customers in the
+`customers` table; the gap is a real business fact, and lesson 09 will teach
+you the join that names those missing customers.
+
+Run: `uv run dojo test 01_select_basics ex4`
+
+## Exercise 5 — DISTINCT over three million rows
+
+Edit `ex5/solution.sql`. The analytics team wants to know **what kinds of
+events the storefront emits**. Return one column, `event_type`, from
+`events`, each value exactly once. Row order doesn't matter.
+
+`events` has 3,000,000 rows and exactly five distinct event types, so this
+query throws away 99.9998% of what it reads. Time it in the lab
+(`\timing on` in psql). It is the clearest demonstration in the course so
+far that *what you ask for* and *what the database must touch to answer* are
+two different things — the idea Part 5 is built on.
+
+Run: `uv run dojo test 01_select_basics ex5`
+
+## Exercise 6 — two computed columns at once
+
+Edit `ex6/solution.sql`. Wholesale wants a bulk price sheet. For every
+product return four columns, in this order:
+
+1. `name`
+2. `category`
+3. `price`
+4. `price * 3`, aliased **`bulk_price`**
+
+All 10,000 rows, any row order. Nothing new here — this is a rep. Getting
+the SELECT list right without thinking about it is the point of a rep.
+
+Run: `uv run dojo test 01_select_basics ex6`
+
 ## Challenge — DISTINCT over a pair (optional, harder)
 
 Edit `challenge/solution.sql`. Merchandising wants every distinct
@@ -113,6 +157,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

@@ -54,3 +54,68 @@ def test_ex2(lesson_db):
         lesson_db,
         "SELECT count(*) = count(DISTINCT email) FROM n_customers",
         True, "each customer stored exactly once")
+
+
+def test_ex3(lesson_db):
+    L.apply_setup(lesson_db)
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    lesson_db.execute(L.exercise("ex2").solution_sql)
+    br_customers = lesson_db.execute(
+        "SELECT count(*) FROM n_customers WHERE country = 'BR'").fetchone()[0]
+    br_flat_rows = lesson_db.execute(
+        "SELECT count(*) FROM flat_orders WHERE customer_country = 'BR'"
+    ).fetchone()[0]
+    assert br_customers > 0 and br_flat_rows > br_customers
+
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM n_customers WHERE country = 'BR'",
+        0, "no Brazilian customers are left under the old code")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM n_customers WHERE country = 'BR2'",
+        br_customers, "exactly the Brazilian customers moved - one row each")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM flat_orders WHERE customer_country = 'BR'",
+        br_flat_rows,
+        "flat_orders is untouched - it would have needed every one of these "
+        "rows updated, and any one of them could have been missed")
+
+
+def test_ex4(lesson_db):
+    L.apply_setup(lesson_db)
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    lesson_db.execute(L.exercise("ex2").solution_sql)
+    products_before = lesson_db.execute(
+        "SELECT count(DISTINCT product_name) FROM n_lines").fetchone()[0]
+    lines_before = lesson_db.execute("SELECT count(*) FROM n_lines").fetchone()[0]
+
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    catalog.assert_table(lesson_db, "n_products", {
+        "product_name": "text", "category": "text"})
+    catalog.assert_pk(lesson_db, "n_products", ["product_name"])
+    catalog.assert_not_null(lesson_db, "n_products", "category")
+    catalog.assert_fk(lesson_db, "n_lines", ["product_name"], "n_products")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM n_products", products_before,
+        "one row per distinct product name, no duplicates and none lost")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM n_lines", lines_before,
+        "the line items themselves are unchanged")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM information_schema.columns "
+        "WHERE table_name = 'n_lines' AND column_name = 'category'",
+        0, "n_lines.category is gone - the category now lives with the product")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO n_lines (order_id, product_name, quantity, unit_price) "
+        "VALUES (1, 'No Such Product 999999', 1, 1.00)",
+        why="the new foreign key must refuse a line for a product that "
+            "does not exist")

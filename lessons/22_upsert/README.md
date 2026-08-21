@@ -54,6 +54,54 @@ touched; if absent (200), create it with stock 0. One statement.
 
 Run: `uv run dojo test 22_upsert ex2`
 
+## Exercise 3 — only update when it is an improvement
+
+Edit `ex3/solution.sql`. A second stocktake arrives, but this warehouse is
+known to under-count: the rule is **only raise a stock figure, never lower
+it**. Today's numbers are product **70 at 80**, product **80 at 120**,
+product **250 at 5**.
+
+One statement. Expected outcome:
+
+- 70 currently holds 100 — 80 is lower, so the row must **not** change.
+- 80 currently holds 100 — 120 is higher, so it becomes 120.
+- 250 has no row at all — it is inserted with 5.
+
+`DO UPDATE` accepts its own `WHERE`, evaluated per conflicting row, with
+both the existing row (`inventory.`) and the proposed row (`EXCLUDED.`) in
+scope:
+
+```sql
+ON CONFLICT (product_id) DO UPDATE
+  SET stock = EXCLUDED.stock
+  WHERE EXCLUDED.stock > inventory.stock
+```
+
+Convince yourself this is idempotent before you run it — the gate will run
+your statement twice and compare.
+
+Run: `uv run dojo test 22_upsert ex3`
+
+## Exercise 4 — upserting a whole set at once
+
+Edit `ex4/solution.sql`. The seasonal reset: every product with `id`
+between **95 and 105 inclusive** should have an inventory row with stock
+**50**, whether or not it has one today. (Products 95–100 already have
+rows; 101–105 do not.)
+
+One statement, and the rows come from a **query** rather than a `VALUES`
+list: `INSERT INTO ... SELECT ... ON CONFLICT ... DO UPDATE ...`. The
+conflict clause works identically — it is the *insert*, not the source of
+the rows, that it attaches to.
+
+This is how real syncs are written: read the source of truth, upsert the
+lot, let the constraint sort out which rows were new. The alternative —
+querying which ids exist, then splitting into an `INSERT` batch and an
+`UPDATE` batch in application code — is more code, slower, and wrong under
+concurrency.
+
+Run: `uv run dojo test 22_upsert ex4`
+
 ## Challenge — conditional upsert (optional)
 
 Edit `challenge/solution.sql`. `price_watch` tracks the best (lowest)
@@ -127,6 +175,57 @@ def test_ex2(lesson_db):
     grader.assert_scalar(
         lesson_db, "SELECT stock FROM inventory WHERE product_id = 200",
         0, "new product 200 registered with stock 0")
+
+
+def test_ex3(lesson_db):
+    L.apply_setup(lesson_db)
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    first_run = _snapshot(lesson_db, "inventory")
+
+    lesson_db.execute(ex.solution_sql)  # run it AGAIN
+    lesson_db.commit()
+    grader.assert_rows_equal(_snapshot(lesson_db, "inventory"), first_run,
+                             ordered=True)
+
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 70",
+        100, "product 70: 80 is lower than 100, so the row must NOT change")
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 80",
+        120, "product 80: 120 beats 100, so it updates")
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 250",
+        5, "product 250 is new, so it inserts")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM inventory",
+        101, "exactly one new row appeared")
+
+
+def test_ex4(lesson_db):
+    L.apply_setup(lesson_db)
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    first_run = _snapshot(lesson_db, "inventory")
+
+    lesson_db.execute(ex.solution_sql)  # run it AGAIN
+    lesson_db.commit()
+    grader.assert_rows_equal(_snapshot(lesson_db, "inventory"), first_run,
+                             ordered=True)
+
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM inventory WHERE product_id BETWEEN 95 AND 105 "
+        "AND stock = 50",
+        11, "all eleven products 95-105 hold stock 50")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM inventory",
+        105, "five new rows appeared (101-105) and no others")
+    grader.assert_scalar(
+        lesson_db, "SELECT stock FROM inventory WHERE product_id = 1",
+        100, "products outside the range are untouched")
 
 
 @pytest.mark.challenge

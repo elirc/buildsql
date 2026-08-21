@@ -1,0 +1,14 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- Learner code lives here. Warnings teach; they must never block a
+         build, or a half-finished exercise would fail with a compiler error
+         instead of the gate's teaching message. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS0168;CS0219;CS1998</NoWarn>
+  </PropertyGroup>
+
+</Project>

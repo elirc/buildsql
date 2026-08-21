@@ -27,6 +27,27 @@ def test_ex3(shared_lesson_db):
     grader.assert_rows_equal(actual, expected)
 
 
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
 @pytest.mark.review
 def test_review1(shared_lesson_db):
     ex = L.exercise("review1")

@@ -60,6 +60,43 @@ and note the lock you'd be paying in production.
 
 Run: `uv run dojo test 44_mvcc_vacuum_bloat ex2`
 
+## Exercise 3 — reclaim and resample in one pass
+
+Edit `ex3/solution.sql`. After the gate's mass `UPDATE`, `bloat_orders`
+has ~100,000 dead tuples **and** statistics that describe the table as it
+was before. Fix both with **one statement**.
+
+`VACUUM` reclaims dead tuples. `ANALYZE` resamples statistics. `VACUUM
+ANALYZE` does both in a single pass over the table, which is why it is the
+standard thing to run after a bulk change — a mass update leaves you with
+two problems, and running only the first one leaves the planner working
+from a description of a table that no longer exists (lesson 36).
+
+The gate checks that the dead tuples are gone *and* that fresh statistics
+exist.
+
+Run: `uv run dojo test 44_mvcc_vacuum_bloat ex3`
+
+## Exercise 4 — indexes bloat too
+
+Edit `ex4/solution.sql`. The mass `UPDATE` did not only bloat the table.
+Every update wrote a new row version, and every new row version needed new
+entries in every index — so `bloat_orders`'s indexes have roughly doubled
+too, and a plain `VACUUM` does not compact them.
+
+Write the **one statement** that rebuilds the table's indexes compactly.
+The gate measures `pg_indexes_size('bloat_orders')` before and after and
+requires a real shrink.
+
+Two things worth knowing before you use it on something that matters. The
+plain form takes an `ACCESS EXCLUSIVE` lock on the table for the whole
+rebuild — an outage on a large index. `REINDEX ... CONCURRENTLY` (from
+PostgreSQL 12) builds the replacement alongside the original and swaps it,
+blocking almost nothing, at the cost of taking longer and being unable to
+run inside a transaction block.
+
+Run: `uv run dojo test 44_mvcc_vacuum_bloat ex4`
+
 ## The gate
 
 ```python
@@ -94,10 +131,12 @@ def _dead_tuples(dbname, wait_for_positive=True):
 
 def test_ex1(lesson_db):
     L.apply_setup(lesson_db)
+    live = lesson_db.execute("SELECT count(*) FROM bloat_orders").fetchone()[0]
     lesson_db.execute("UPDATE bloat_orders SET total = total + 1")
     lesson_db.commit()
     dead_before = _dead_tuples(lesson_db.info.dbname)
-    assert dead_before >= 90000, "setup: the UPDATE should leave ~100k dead tuples"
+    assert dead_before >= live * 0.9, (
+        "setup: the UPDATE should leave one dead tuple per row")
 
     ex = L.exercise("ex1")
     with db.connect(lesson_db.info.dbname, autocommit=True) as vconn:
@@ -130,6 +169,54 @@ def test_ex2(lesson_db):
         "  Plain VACUUM reclaims space for REUSE but rarely returns it to the OS.\n"
         "  The variant that rewrites the table compactly is what this exercise wants\n"
         "  - and note what it costs: an exclusive lock for the whole rewrite."
+    )
+
+
+def test_ex3(lesson_db):
+    L.apply_setup(lesson_db)
+    live = lesson_db.execute("SELECT count(*) FROM bloat_orders").fetchone()[0]
+    lesson_db.execute("UPDATE bloat_orders SET total = total + 1")
+    lesson_db.commit()
+    dead_before = _dead_tuples(lesson_db.info.dbname)
+    assert dead_before >= live * 0.9, (
+        "setup: the UPDATE should leave one dead tuple per row")
+
+    ex = L.exercise("ex3")
+    with db.connect(lesson_db.info.dbname, autocommit=True) as vconn:
+        vconn.execute(ex.solution_sql)
+
+    time.sleep(0.5)
+    dead_after = _dead_tuples(lesson_db.info.dbname, wait_for_positive=False)
+    assert dead_after <= dead_before * 0.1, (
+        f"DEAD TUPLES REMAIN: {dead_before:,} before, {dead_after:,} after."
+    )
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) > 0 FROM pg_stats WHERE tablename = 'bloat_orders'",
+        True,
+        "no fresh statistics: VACUUM alone reclaims space but tells the "
+        "planner nothing. One statement does both.")
+
+
+def test_ex4(lesson_db):
+    L.apply_setup(lesson_db)
+    lesson_db.execute("UPDATE bloat_orders SET total = total + 1")
+    lesson_db.commit()
+    size_before = lesson_db.execute(
+        "SELECT pg_indexes_size('bloat_orders')").fetchone()[0]
+
+    ex = L.exercise("ex4")
+    with db.connect(lesson_db.info.dbname, autocommit=True) as rconn:
+        rconn.execute(ex.solution_sql)
+
+    size_after = lesson_db.execute(
+        "SELECT pg_indexes_size('bloat_orders')").fetchone()[0]
+    assert size_after < size_before * 0.8, (
+        f"INDEXES DID NOT SHRINK: {size_before:,} bytes before, "
+        f"{size_after:,} after.\n"
+        "  Every updated row needed new index entries; VACUUM marks the old "
+        "ones reusable\n  but does not compact the index. The statement that "
+        "rebuilds indexes from scratch is what this exercise wants."
     )
 ```
 

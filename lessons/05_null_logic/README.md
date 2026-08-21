@@ -61,6 +61,50 @@ filter the NULL out *inside* the list (`WHERE manager_id IS NOT NULL`).
 
 Run: `uv run dojo test 05_null_logic ex2`
 
+## Exercise 3 — NULL is contagious
+
+Edit `ex3/solution.sql`. Payroll wants a manager *code* rather than an id:
+for every staff member return `id`, `name`, and `manager_id + 1000` aliased
+**`mgr_code`**.
+
+All 500 rows, any order.
+
+Nothing filters here, so every row survives — but look at the CEO's row in
+the output. `NULL + 1000` is not `1000`; it is NULL. **Any** arithmetic,
+concatenation, or function applied to NULL propagates the NULL outward,
+because the answer to "what is the unknown value plus a thousand?" is still
+unknown. This is the same rule as `NULL = NULL`, applied to arithmetic
+instead of comparison, and it is why a single missing value can turn an
+entire computed column into NULLs.
+
+Run: `uv run dojo test 05_null_logic ex3`
+
+## Exercise 4 — when NOT IN is safe
+
+Edit `ex4/solution.sql`. Merchandising is auditing the launch window: which
+products **never appeared on any line of the first 1,000 orders** (that is,
+`order_items` rows whose `order_id` is 1000 or less)? Columns: `id`,
+`name`. Any order.
+
+Use `NOT IN` with a subquery this time:
+
+```sql
+WHERE id NOT IN (SELECT product_id FROM order_items WHERE order_id <= 1000)
+```
+
+In exercise 2 that shape returned zero rows and lied to you. Here it works
+perfectly — and the difference is not luck. Before you run it, look up
+`order_items.product_id` in [docs/dataset.md](../../docs/dataset.md) and
+work out *why* this one is safe. If you can state the rule out loud, this
+lesson has done its job.
+
+(The `order_id <= 1000` narrowing is not cosmetic. Drop it and the same
+query has to check 10,000 products against a million values and takes
+minutes — `NOT IN` over a large subquery is a performance trap as well as a
+NULL trap. The reading explains both.)
+
+Run: `uv run dojo test 05_null_logic ex4`
+
 ## Challenge — IS DISTINCT FROM (optional)
 
 Edit `challenge/solution.sql`. Return every staff member whose
@@ -98,6 +142,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

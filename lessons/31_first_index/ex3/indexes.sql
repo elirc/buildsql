@@ -1,0 +1,1 @@
+-- 31_first_index/ex3: your CREATE INDEX here (see README.md)

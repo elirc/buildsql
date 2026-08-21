@@ -71,6 +71,65 @@ same rows as lesson 09's pattern, sturdier idiom.
 
 Run: `uv run dojo test 13_subqueries ex3`
 
+## Exercise 4 — EXISTS, the positive form
+
+Edit `ex4/solution.sql`. Support wants to call the French customers who
+have had an order **cancelled**: every customer in `'FR'` for whom at
+least one `orders` row exists with status `'cancelled'`.
+
+Columns: `id`, `name`. Any order.
+
+Exercise 3 used `NOT EXISTS`; this is the same construct without the
+negation. Two things to notice. `EXISTS` stops at the first matching row —
+it is a *test*, not a count, so the database can abandon the search
+immediately. And it never duplicates the outer row: a customer with nine
+cancelled orders appears exactly once, where a join would list them nine
+times and force you to bolt on a `DISTINCT`.
+
+Run: `uv run dojo test 13_subqueries ex4`
+
+## Exercise 5 — a subquery in the SELECT list
+
+Edit `ex5/solution.sql`. The account-management dashboard shows the first
+twenty customers with their order counts. For every customer with `id <=
+20`, return `id`, `name`, and their number of orders aliased **`orders`** —
+computed with a **correlated scalar subquery** in the SELECT list, not a
+join.
+
+Three columns, twenty rows, any order.
+
+A scalar subquery in the SELECT list runs conceptually once per outer row
+and must return exactly one row and one column — return two rows and
+PostgreSQL raises an error at runtime, which is a real hazard of the form.
+Its virtue is that it cannot change the outer row count: twenty customers
+in, twenty rows out, guaranteed, with no grain question to answer.
+
+Run: `uv run dojo test 13_subqueries ex5`
+
+## Exercise 6 — a subquery in FROM (the derived table)
+
+Edit `ex6/solution.sql`. Finance wants the customers whose **real
+lifetime revenue** (orders with status `'paid'` or `'shipped'`) exceeds
+**20,000**.
+
+Columns: `customer_id`, `revenue`. Any order.
+
+You cannot filter on `sum(total) > 20000` in `WHERE` — the sum does not
+exist yet — and `HAVING` would work, but this exercise wants the fourth
+kind of subquery: one in the **`FROM`** clause. Aggregate in a parenthesised
+query, give it an alias, and treat the result as a table you can filter:
+
+```sql
+FROM (SELECT ... GROUP BY ...) AS per_customer
+WHERE revenue > 20000
+```
+
+A derived table must have an alias — PostgreSQL insists. This is exactly
+what a CTE (lesson 14) does with a nicer name, and being able to read both
+matters because you will meet both.
+
+Run: `uv run dojo test 13_subqueries ex6`
+
 ## Challenge — latest order per customer (correlated)
 
 Edit `challenge/solution.sql`. For customers with `id <= 10`, their most
@@ -115,6 +174,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

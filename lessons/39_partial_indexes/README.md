@@ -64,6 +64,62 @@ selects and orders (the gate forbids Seq Scan *and* Sort).
 
 Run: `uv run dojo test 39_partial_indexes ex2`
 
+## Exercise 3 — index only the rare status
+
+`ex3/solution.sql` (provided) is the refunds team's daily query:
+
+```sql
+SELECT id, customer_id, total
+FROM orders
+WHERE status = 'cancelled' AND total > 1990;
+```
+
+Edit `ex3/indexes.sql` with a **partial** index: on `total`, restricted to
+cancelled orders.
+
+```sql
+CREATE INDEX ... ON orders (total) WHERE status = 'cancelled';
+```
+
+The predicate is not a filter you apply at query time — it decides which
+rows are *in the index at all*. Roughly 83,000 of 500,000 orders are
+cancelled, so this index is a sixth the size of the full one, a sixth the
+write cost, and cached far more readily.
+
+For PostgreSQL to use it, the planner must **prove** your `WHERE` implies
+the index's predicate. `status = 'cancelled'` matches literally; `status IN
+('cancelled')` also works; `status <> 'paid'` does not, because it does not
+imply the predicate. That proof requirement is the one thing to remember
+about partial indexes.
+
+Run: `uv run dojo test 39_partial_indexes ex3`
+
+## Exercise 4 — the five-star index
+
+`ex4/solution.sql` (provided) powers the "rave reviews" widget:
+
+```sql
+SELECT id, created_at
+FROM reviews
+WHERE rating = 5 AND product_id = 42;
+```
+
+Edit `ex4/indexes.sql` with a partial index on `product_id`, restricted to
+`rating = 5`.
+
+Note which column went where, and why it is the opposite of what a
+composite index would do. A composite `(rating, product_id)` would store
+all million reviews and use `rating` as the first level of the tree.
+The partial index stores only the 200,000 five-star rows and spends its
+entire structure on `product_id` — the column that actually discriminates.
+
+Partial indexes are the tool for a *permanent* asymmetry in the data:
+active rows among archived ones, unprocessed rows in a queue, errors in a
+log. When the interesting subset is small and stable, indexing only it is
+strictly better than indexing everything.
+
+Run: `uv run dojo test 39_partial_indexes ex4`
+
 ## The gate
 
 ```python
@@ -105,6 +161,34 @@ def test_ex2(lesson_db):
     grader.assert_rows_equal(actual, expected)
     p = explain(lesson_db, ex.solution_sql)
     grader.assert_plan(p, must_not_have=['Seq Scan', 'Sort'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
     measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
     grader.assert_faster_than_baseline(measured, baseline, ratio=8)
 ```

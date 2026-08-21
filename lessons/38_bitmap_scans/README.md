@@ -67,6 +67,65 @@ planner will choose the bitmap pair on its own — the gate requires the
 
 Run: `uv run dojo test 38_bitmap_scans ex2`
 
+## Exercise 3 — two indexes, combined
+
+`ex3/solution.sql` (provided) filters the line items on two independent
+columns:
+
+```sql
+SELECT id, order_id, price
+FROM order_items
+WHERE product_id = 42 AND quantity = 5;
+```
+
+Edit `ex3/indexes.sql` and create **two separate single-column indexes** —
+one on `product_id`, one on `quantity`. Not a composite.
+
+Now read the plan, because it will probably not do what you expect.
+PostgreSQL *can* scan both indexes, build a bitmap from each and `BitmapAnd`
+them together — and here it does not. It scans the `product_id` index alone
+and re-checks `quantity = 5` as a filter, because `product_id` is selective
+enough on its own that scanning the second index would cost more than it
+saves.
+
+That is the planner being right, and it is the honest lesson: `BitmapAnd`
+is not what you get whenever two indexed columns appear in an `AND`. You
+get it only when **neither** index is selective enough alone but their
+intersection is small — a narrower band than most people assume.
+
+So the gate asks for a `Bitmap Heap Scan` and no `Seq Scan`, not for the
+`BitmapAnd` you might have predicted. And the real answer for a hot
+two-column `AND` is still the composite index from lesson 32: one descent
+instead of one index scan plus a filter.
+
+Run: `uv run dojo test 38_bitmap_scans ex3`
+
+## Exercise 4 — the middle gear
+
+`ex4/solution.sql` (provided) takes a slice of the review corpus:
+
+```sql
+SELECT id, product_id, rating
+FROM reviews
+WHERE product_id BETWEEN 1 AND 20;
+```
+
+Edit `ex4/indexes.sql` with a plain single-column index. The gate requires
+a **`Bitmap Heap Scan`**.
+
+About 2,000 rows match — twenty products at roughly a hundred reviews each.
+That is too many for a plain `Index Scan`, because 2,000 random heap visits
+in index order keep revisiting the same pages, and far too few to justify
+reading all million rows. So the planner takes the middle gear: collect the
+matching row locations, **sort them into physical order**, then sweep the
+heap once, reading each page at most once and in a sequence the operating
+system can read ahead for.
+
+You do not ask for a bitmap scan; you get one when the row count lands in
+that band. Seeing it in a plan tells you something true about your data.
+
+Run: `uv run dojo test 38_bitmap_scans ex4`
+
 ## The gate
 
 ```python
@@ -110,6 +169,34 @@ def test_ex2(lesson_db):
     grader.assert_plan(p, must_not_have=['Seq Scan'], must_have=['Bitmap Heap Scan'])
     measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
     grader.assert_faster_than_baseline(measured, baseline, ratio=3)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_have=['Bitmap Heap Scan'], must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_have=['Bitmap Heap Scan'], must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
 ```
 
 ## The teaching point

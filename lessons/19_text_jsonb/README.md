@@ -62,6 +62,66 @@ this is its home turf. (2,079 rows.)
 
 Run: `uv run dojo test 19_text_jsonb ex3`
 
+## Exercise 4 — the first word
+
+Edit `ex4/solution.sql`. Merchandising wants to group the catalogue by
+brand, and the brand is the **first word** of the product name (`Nova
+Kettle 812` is a `Nova`).
+
+For products with `id <= 50`, return `id` and the first word of `name`
+aliased **`brand`**. Any row order.
+
+`split_part(text, delimiter, n)` returns the nth field, 1-based, and — this
+is why it is the right tool — returns the empty string rather than NULL when
+the field does not exist. Compare `substring(name FROM '^[^ ]+')`, which
+does the same job with a regex and returns NULL on no match. Both are
+defensible; knowing which one produces which answer on bad input is the
+skill.
+
+Run: `uv run dojo test 19_text_jsonb ex4`
+
+## Exercise 5 — arrow versus double arrow
+
+Edit `ex5/solution.sql`. Put the two JSONB extraction operators
+side by side. For products with `id <= 20`, return three columns:
+
+1. `id`
+2. `attributes ->> 'color'` aliased **`color_text`**
+3. `attributes -> 'tags'` aliased **`tags_json`**
+
+Twenty rows, any order.
+
+`->` returns **JSONB** and `->>` returns **text**. That single distinction
+is behind most JSONB bugs: `attributes -> 'color' = 'red'` fails to compare
+(JSONB against text), while `attributes ->> 'color' = 'red'` works, and
+`attributes -> 'color' = '"red"'::jsonb` also works — note the quotes
+*inside* the string, because a JSON string literal includes them.
+
+The rule of thumb: use `->` while you are still navigating into the
+document, and `->>` on the last step, when you want a value SQL can compare.
+
+Run: `uv run dojo test 19_text_jsonb ex5`
+
+## Exercise 6 — the colour census
+
+Edit `ex6/solution.sql`. How many products come in each colour? Group the
+whole catalogue by the `color` key inside `attributes`.
+
+Columns: `color` (text), `products` (count). Five rows, any order.
+
+Extract with `->>` so you get text you can group on, then `GROUP BY` it
+exactly as you would any other expression — this is lesson 07's
+"grouping by an expression" with a JSONB accessor in the expression slot.
+
+One thing to notice, because it matters in lesson 42: nothing about this
+query can use an index today. `attributes ->> 'color'` is a function of a
+column, so a plain index on `attributes` is useless to it, and the whole
+10,000-row table must be read. Two fixes exist — an expression index on
+`(attributes ->> 'color')` (lesson 40) and a GIN index on the document
+(lesson 42) — and they help with different queries.
+
+Run: `uv run dojo test 19_text_jsonb ex6`
+
 ## Challenge — the tag census (optional)
 
 Edit `challenge/solution.sql`. How many products carry each tag? Explode
@@ -105,6 +165,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

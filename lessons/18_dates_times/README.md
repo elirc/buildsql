@@ -62,6 +62,49 @@ third appearance).
 
 Run: `uv run dojo test 18_dates_times ex2`
 
+## Exercise 3 — extract classifies, date_trunc groups
+
+Edit `ex3/solution.sql`. Is there a seasonal pattern? Count orders by
+**calendar month number**, folding every year together: January 2022 and
+January 2023 both land in month 1.
+
+Columns: `month_no` (an integer 1–12 — cast the extract with `::int`),
+`orders`. **Ordered by `month_no` ascending.** (12 rows.)
+
+Compare this against lesson 12's ex5, which grouped by `date_trunc('month',
+...)` and produced eleven *distinct* months. Same column, same table, two
+completely different reports: truncation keeps periods apart, extraction
+folds them together. Reaching for the wrong one produces a chart that looks
+plausible and answers a question nobody asked.
+
+Note also that this dataset spans thirteen months, so November and December
+have one year of data where some other months have two — a seasonality
+report over an incomplete number of years is comparing apples to two
+apples.
+
+Run: `uv run dojo test 18_dates_times ex3`
+
+## Exercise 4 — weeks, and where they start
+
+Edit `ex4/solution.sql`. The weekly trading report for October 2023: for
+orders with `created_at` in October (half-open, as always), one row per
+week with the order count and revenue.
+
+Columns, in this order: `week` (`date_trunc('week', created_at)`),
+`orders`, `revenue` (sum of `total`). **Ordered by `week` ascending.**
+
+Count the rows before you run it. October 2023 has 31 days, so you might
+expect four or five weeks — and you will get **six**, with the first and
+last both partial. `date_trunc('week', ...)` follows ISO 8601: weeks start
+on **Monday**, and October 1st 2023 was a Sunday, so it belongs to the week
+beginning September 25th.
+
+That is a real reporting hazard. A "weekly revenue" table whose first and
+last rows are partial weeks will show a dip at both ends that nobody in the
+business caused.
+
+Run: `uv run dojo test 18_dates_times ex4`
+
 ## Challenge — peak purchase hours (optional)
 
 Edit `challenge/solution.sql`. The 3 hours of the day (0–23) with the
@@ -100,6 +143,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected, ordered=True)

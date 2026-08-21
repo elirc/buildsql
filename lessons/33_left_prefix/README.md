@@ -75,6 +75,50 @@ predicate needs.
 
 Run: `uv run dojo test 33_left_prefix ex2`
 
+## Exercise 3 — the whole key
+
+`ex3/solution.sql` (provided) asks the clickstream a two-part question:
+
+```sql
+SELECT id, ts, payload
+FROM events
+WHERE customer_id = 4242 AND event_type = 'purchase';
+```
+
+Edit `ex3/indexes.sql` with one composite index over both columns, the
+selective one leading.
+
+Three million rows, two equality conditions, and the index narrows on both
+in one walk. This is the case composite indexes exist for — and the
+baseline it is measured against is a full scan of the largest table in the
+database, so the difference is not subtle.
+
+Run: `uv run dojo test 33_left_prefix ex3`
+
+## Exercise 4 — half the key is still a key
+
+`ex4/solution.sql` (provided) asks for **everything** one customer did:
+
+```sql
+SELECT id, event_type, ts
+FROM events
+WHERE customer_id = 4242;
+```
+
+Edit `ex4/indexes.sql` and build **the same two-column index as exercise
+3** — `(customer_id, event_type)` — not a single-column one.
+
+This is the half of the prefix rule that works, and it is worth proving to
+yourself: a query on the *leading* column alone uses the composite index
+happily, because the entries are sorted by `customer_id` first. Exercise 2
+showed the other half — the trailing column alone gets nothing.
+
+The practical consequence is that `(a, b)` makes a separate index on `(a)`
+redundant. Every prefix of a composite index is free; every suffix costs a
+second index.
+
+Run: `uv run dojo test 33_left_prefix ex4`
+
 ## The gate
 
 ```python
@@ -110,6 +154,34 @@ def test_ex2(lesson_db):
     ex = L.exercise("ex2")
     expected = ex.fetch(lesson_db, ex.expected_sql)
     baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex2",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
                                       ex.expected_sql)
     ex.apply_indexes(lesson_db)
     actual = ex.fetch(lesson_db, ex.solution_sql)

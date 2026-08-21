@@ -1,0 +1,1 @@
+-- 39_partial_indexes/ex3: your CREATE INDEX here (see README.md)

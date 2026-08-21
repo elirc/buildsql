@@ -1,0 +1,1 @@
+-- 36_statistics_and_the_planner/ex4: your CREATE INDEX here (see README.md)

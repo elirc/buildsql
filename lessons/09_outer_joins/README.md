@@ -54,6 +54,44 @@ order line. Columns: `id`, `name`. Any order.
 
 Run: `uv run dojo test 09_outer_joins ex2`
 
+## Exercise 3 — counting things that might not exist
+
+Edit `ex3/solution.sql`. The catalogue team wants a review-coverage report
+for **toys**: every product in category `'toys'`, with the number of
+reviews it has — and products with **no** reviews must appear with a count
+of **0**, not vanish.
+
+Columns, in this order: `id`, `name`, and the review count aliased
+**`reviews`**. Any row order.
+
+Two details decide whether this is right. The join must be a `LEFT JOIN`
+from `products`, so unreviewed products survive. And the count must be
+`count(r.id)`, not `count(*)` — a NULL-extended row is still a row, so
+`count(*)` would report **1** for a product with no reviews at all. Lesson
+06's `count(*)` versus `count(column)` distinction, finally showing its
+teeth.
+
+Run: `uv run dojo test 09_outer_joins ex3`
+
+## Exercise 4 — a filter that belongs in ON
+
+Edit `ex4/solution.sql`. Now the same report, but only **5-star** reviews
+count: every product in category `'garden'`, with the number of reviews it
+has **whose rating is 5** — and again, products with none must appear with
+`0`.
+
+Columns, in this order: `id`, `name`, and the count aliased
+**`five_star`**. Any row order.
+
+This is the lesson's whole point in one query. `r.rating = 5` is a
+condition on the **right** table of a `LEFT JOIN`, so it must go in the
+`ON` clause, where it decides *what counts as a match*. Put it in `WHERE`
+and it runs after NULL-extension: `NULL = 5` is unknown, every unmatched
+product is deleted, and your LEFT JOIN has silently become an INNER JOIN.
+Write it both ways in the lab and compare the row counts before you submit.
+
+Run: `uv run dojo test 09_outer_joins ex4`
+
 ## Challenge — ON vs WHERE, felt in your hands (optional)
 
 Edit `challenge/solution.sql`. Sales wants **all 2,924 Mexican (`'MX'`)
@@ -92,6 +130,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

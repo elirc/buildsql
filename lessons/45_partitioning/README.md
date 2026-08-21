@@ -65,6 +65,59 @@ graded.
 
 Run: `uv run dojo test 45_partitioning ex2`
 
+## Exercise 3 — next month, before it arrives
+
+Edit `ex3/solution.sql`. Your ex1 partitioned table is created first
+automatically. December is coming: add a third partition,
+**`events_p_dec`**, covering `'2023-12-01'` up to `'2024-01-01'`.
+
+```sql
+CREATE TABLE events_p_dec PARTITION OF events_p
+  FOR VALUES FROM ('2023-12-01') TO ('2024-01-01');
+```
+
+One statement, instant, no data moved.
+
+This is the operational half of partitioning and the half that gets
+forgotten. A range-partitioned table with no partition for tomorrow's data
+**rejects the insert** — there is nowhere to put it. Production systems
+either create partitions ahead of time on a schedule (a cron job, or
+`pg_partman`) or attach a `DEFAULT` partition as a safety net. Discovering
+this at midnight on the first of the month is a rite of passage worth
+skipping.
+
+The gate checks that `events_p` now has at least three partitions attached
+and that the new one is one of them.
+
+Run: `uv run dojo test 45_partitioning ex3`
+
+## Exercise 4 — dropping a month in milliseconds
+
+Edit `ex4/solution.sql`. Retention policy: October's clickstream is out of
+scope. Detach it.
+
+```sql
+ALTER TABLE events_p DETACH PARTITION events_p_oct;
+```
+
+Your ex1 table is created first automatically.
+
+This is the reason time-series tables get partitioned, more than query
+speed. `DELETE FROM events WHERE ts < '2023-11-01'` on a real event table
+means rewriting hundreds of millions of rows, generating an enormous amount
+of WAL, bloating the table, and then needing a `VACUUM` to reclaim any of
+it. `DETACH PARTITION` is a **catalog update**: the table is no longer part
+of the parent, and it takes about as long as this sentence.
+
+After detaching you can archive it, `DROP` it, or leave it standing as an
+ordinary table — the gate checks it still exists as a table and is no
+longer a partition, and that `events_p` now holds only November.
+
+(`DETACH PARTITION CONCURRENTLY` avoids taking a strong lock on the parent,
+which is what you want on a live system.)
+
+Run: `uv run dojo test 45_partitioning ex4`
+
 ## The gate
 
 ```python
@@ -114,6 +167,63 @@ def test_ex2(lesson_db):
         "  Does your WHERE filter on the PARTITION KEY (ts) with plain "
         "comparisons the planner can prove?\n\nPlan:\n" + p.render()
     )
+
+
+def test_ex3(lesson_db):
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    lesson_db.commit()
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) >= 3 FROM pg_inherits i "
+        "JOIN pg_class parent ON parent.oid = i.inhparent "
+        "WHERE parent.relname = 'events_p'",
+        True, "events_p has at least three partitions attached")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM pg_inherits i "
+        "JOIN pg_class parent ON parent.oid = i.inhparent "
+        "JOIN pg_class child ON child.oid = i.inhrelid "
+        "WHERE parent.relname = 'events_p' AND child.relname = 'events_p_dec'",
+        1, "events_p_dec is attached to events_p as a partition")
+    lesson_db.execute("SAVEPOINT dec_probe")
+    lesson_db.execute(
+        "INSERT INTO events_p (id, customer_id, event_type, payload, ts) "
+        "VALUES (99000001, 1, 'view', '{}'::jsonb, '2023-12-15 10:00+00')")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM events_p_dec WHERE id = 99000001",
+        1, "a December row routes into the December partition automatically")
+    lesson_db.execute("ROLLBACK TO SAVEPOINT dec_probe")
+
+
+def test_ex4(lesson_db):
+    lesson_db.execute(L.exercise("ex1").solution_sql)
+    lesson_db.commit()
+    november = lesson_db.execute(
+        "SELECT count(*) FROM events WHERE ts >= '2023-11-01'").fetchone()[0]
+
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM pg_inherits i "
+        "JOIN pg_class parent ON parent.oid = i.inhparent "
+        "JOIN pg_class child ON child.oid = i.inhrelid "
+        "WHERE parent.relname = 'events_p' AND child.relname = 'events_p_oct'",
+        0, "events_p_oct is no longer attached to events_p")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM pg_class WHERE relname = 'events_p_oct'",
+        1, "but the table itself still exists - DETACH is not DROP")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM events_p", november,
+        "events_p now holds only the November rows, and not one row was "
+        "rewritten to make that true")
 ```
 
 ## The teaching point

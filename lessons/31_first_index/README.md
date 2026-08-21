@@ -68,6 +68,49 @@ it. No speed stage; the lesson is the shape.
 
 Run: `uv run dojo test 31_first_index ex2`
 
+## Exercise 3 — one product's reviews
+
+`ex3/solution.sql` (provided) pulls one product's reviews out of a
+million:
+
+```sql
+SELECT id, rating, created_at
+FROM reviews
+WHERE product_id = 42;
+```
+
+Edit `ex3/indexes.sql` with the index that makes it fast. Same move as
+exercise 1 on a different table — and this is the shape you will meet more
+than any other in real work: a foreign-key column, filtered by equality,
+with no index because PostgreSQL does not create one for you.
+
+The gate requires the plan to contain no `Seq Scan` and the query to run at
+least 8× faster than the un-indexed baseline it measures on your machine.
+
+Run: `uv run dojo test 31_first_index ex3`
+
+## Exercise 4 — indexing a value, not a key
+
+`ex4/solution.sql` (provided) finds the maximum-value orders:
+
+```sql
+SELECT id, customer_id, status
+FROM orders
+WHERE total > 1999.90;
+```
+
+Edit `ex4/indexes.sql`.
+
+Nothing says an index has to be on a key or a foreign key — an index is
+just a sorted copy of one or more columns plus a pointer back to the row,
+and any column you filter on equality or range is a candidate. What makes
+*this* one worth having is selectivity: `total > 1999.90` matches a
+handful of rows out of half a million, so the index eliminates almost
+everything. An index on `status`, which has four values across 500,000
+rows, would eliminate almost nothing — lesson 39 comes back to why.
+
+Run: `uv run dojo test 31_first_index ex4`
+
 ## Challenge — same move, bigger table (optional)
 
 `challenge/solution.sql` (provided) hunts one customer's events in the
@@ -124,6 +167,34 @@ def test_ex2(lesson_db):
     grader.assert_rows_equal(actual, expected)
     p = explain(lesson_db, ex.solution_sql)
     grader.assert_plan(p, must_have=["Seq Scan"])  # yes, MUST have
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
 
 
 @pytest.mark.challenge

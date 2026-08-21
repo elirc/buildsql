@@ -1,0 +1,1 @@
+-- 32_composite_indexes/ex4: your CREATE INDEX here (see README.md)

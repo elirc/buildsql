@@ -50,6 +50,42 @@ value proposition.
 
 Run: `uv run dojo test 27_views ex2`
 
+## Exercise 3 — a definition worth sharing
+
+Edit `ex3/solution.sql`. Create view **`category_revenue`** with two
+columns, `category` and `revenue`: for each product category, the
+line-item revenue (`sum(quantity * price)` from `order_items`) of orders
+whose `status` is `'paid'` or `'shipped'`.
+
+Six rows when queried.
+
+This is lesson 12's revenue definition again, and this time it stops
+being re-typed. Everything contentious about the number — which statuses
+count, whether revenue means line items or order totals, whether it is the
+line's historical price or the product's current one — is now written down
+in exactly one place. When somebody disagrees, there is one object to
+argue with and one change to make.
+
+Run: `uv run dojo test 27_views ex3`
+
+## Exercise 4 — a view that names a population
+
+Edit `ex4/solution.sql`. Create view **`active_customers`** with three
+columns, `id`, `name`, `country`: every customer who has at least one
+order with status `'paid'` or `'shipped'`.
+
+The previous views named a *measure*. This one names a **population** —
+who counts as "active" — and populations are argued about even more than
+measures. Encoding it as a view means every report that says "active
+customers" is talking about the same people, and changing the definition
+changes all of them at once.
+
+Use `EXISTS` rather than a join: a customer with forty qualifying orders
+must appear once, and `EXISTS` gives you that without a `DISTINCT` bolted
+on top.
+
+Run: `uv run dojo test 27_views ex4`
+
 ## The gate
 
 ```python
@@ -88,6 +124,39 @@ def test_ex2(lesson_db):
         "WHERE spend > 20000").fetchall()
     actual = lesson_db.execute(
         "SELECT customer_id, name, spend FROM top_spenders").fetchall()
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_view(lesson_db, "category_revenue")
+    expected = lesson_db.execute("""
+        SELECT p.category, sum(oi.quantity * oi.price)
+        FROM orders o
+        JOIN order_items oi ON oi.order_id = o.id
+        JOIN products p     ON p.id = oi.product_id
+        WHERE o.status IN ('paid', 'shipped')
+        GROUP BY p.category
+    """).fetchall()
+    actual = lesson_db.execute(
+        "SELECT category, revenue FROM category_revenue").fetchall()
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_view(lesson_db, "active_customers")
+    expected = lesson_db.execute("""
+        SELECT c.id, c.name, c.country
+        FROM customers c
+        WHERE EXISTS (SELECT 1 FROM orders o
+                      WHERE o.customer_id = c.id
+                        AND o.status IN ('paid', 'shipped'))
+    """).fetchall()
+    actual = lesson_db.execute(
+        "SELECT id, name, country FROM active_customers").fetchall()
     grader.assert_rows_equal(actual, expected)
 ```
 

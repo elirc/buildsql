@@ -83,6 +83,34 @@ row can't be out of order).
 uv run dojo test 00_hello_dojo ex2
 ```
 
+## Exercise 3 — the same trick, a different table
+
+Edit `ex3/solution.sql`. Return **everything about customer 4242**:
+every column of the `customers` table, for the single row whose `id` is
+4242.
+
+Same two ideas as ex2 — `*` for all columns, `WHERE id = ...` for one row —
+applied to a table with a different shape. Five columns come back this time
+(`id`, `name`, `email`, `country`, `created_at`), not six. Predict the
+column *count* before you run it; being surprised by the shape of your own
+result is the habit this course is trying to break.
+
+Run: `uv run dojo test 00_hello_dojo ex3`
+
+## Exercise 4 — ask for less
+
+Edit `ex4/solution.sql`. Product 4242 again — but this time return only
+two columns, `name` and `price`, in that order.
+
+`*` is convenient and almost always wrong outside a scratch console: it
+couples whatever reads your query to columns it never asked for, and it
+quietly changes shape the day someone adds a column. Naming your columns is
+the default habit; lesson 01 is entirely about it.
+
+One row, two columns.
+
+Run: `uv run dojo test 00_hello_dojo ex4`
+
 ## The gate
 
 This is the entire test file for this lesson. Every lesson README shows you
@@ -105,6 +133,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

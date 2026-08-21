@@ -76,6 +76,65 @@ UNION ALL step terminates.
 
 Run: `uv run dojo test 14_ctes ex3`
 
+## Exercise 4 — two CTEs, joined
+
+Edit `ex4/solution.sql`. The market overview: for each customer
+`country`, how many customers we have there and how much those customers
+have spent in total (all orders, any status).
+
+Columns, in this order: `country`, `customers` (count), `revenue` (sum of
+order totals). Twelve rows, any order.
+
+Build it as two named steps and join them: one CTE counting customers per
+country, another summing revenue per country, then a join on `country`.
+
+You could do this in one query with a single join and two aggregates — try
+it, and check the customer count carefully. Joining `customers` to `orders`
+first duplicates each customer once per order, so `count(*)` counts orders
+and `count(DISTINCT c.id)` becomes necessary. Aggregating each side
+*separately* and joining the small results afterwards sidesteps the grain
+problem entirely, and that is a pattern worth having in your hands.
+
+Run: `uv run dojo test 14_ctes ex4`
+
+## Exercise 5 — recursion without a hierarchy
+
+Edit `ex5/solution.sql`. Produce the integers **1 through 12**, one per
+row, in a single column named `n`, using `WITH RECURSIVE` — no table
+involved at all.
+
+Twelve rows, any order.
+
+Recursion is not only for trees. The base case is `SELECT 1`, the step adds
+one to what it has, and the `WHERE n < 12` inside the recursive branch is
+the **termination condition** — remove it and PostgreSQL will happily count
+forever. (Ctrl-C is your friend; the lab is a throwaway clone.)
+
+Being able to generate a series matters more than it looks: it is how you
+produce the months a `GROUP BY` cannot invent, so a report can show a zero
+instead of a missing bar. PostgreSQL also ships `generate_series(1, 12)`,
+which is what you would actually use — but writing the recursion once
+teaches you what it does.
+
+Run: `uv run dojo test 14_ctes ex5`
+
+## Exercise 6 — one person's whole subtree
+
+Edit `ex6/solution.sql`. Employee **2** is being promoted, and HR needs
+everyone in their reporting tree — direct reports, their reports, all the
+way down — plus employee 2 themself.
+
+Columns: `id`, `name`, `depth` (employee 2 is depth 1, their direct
+reports 2, and so on). Any row order.
+
+Exercise 3 started the recursion at the CEO (`manager_id IS NULL`). The
+only change here is the base case: start at one specific row. That is the
+whole trick to subtree queries, and it is why the adjacency-list model plus
+a recursive CTE is enough for almost every hierarchy problem you will
+meet.
+
+Run: `uv run dojo test 14_ctes ex6`
+
 ## Challenge — the management chain (optional)
 
 Edit `challenge/solution.sql`. Walk **upward**: for employee 442, produce
@@ -120,6 +179,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

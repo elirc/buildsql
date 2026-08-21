@@ -20,6 +20,20 @@ def test_ex2(shared_lesson_db):
     grader.assert_rows_equal(actual, expected, ordered=True)
 
 
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
 @pytest.mark.challenge
 def test_challenge(shared_lesson_db):
     ex = L.exercise("challenge")

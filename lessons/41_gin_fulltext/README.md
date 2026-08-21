@@ -72,6 +72,58 @@ computed only for them.
 
 Run: `uv run dojo test 41_gin_fulltext ex2`
 
+## Exercise 3 — a query written by a human
+
+`ex3/solution.sql` (provided) searches the same corpus, but the query
+comes from a search box rather than from a developer:
+
+```sql
+SELECT id
+FROM reviews
+WHERE to_tsvector('english', body)
+      @@ plainto_tsquery('english', 'durable battery');
+```
+
+Edit `ex3/indexes.sql` with the same GIN index as exercise 1.
+
+`to_tsquery` demands operator syntax — `'durable & battery'` — and raises a
+syntax error on anything else, which makes it completely unsuitable for
+user input. `plainto_tsquery` takes arbitrary text, normalises it, and ANDs
+the terms together. It never raises on punctuation, quotes or stray
+ampersands.
+
+The three query-builders are worth knowing apart: `to_tsquery` for
+developer-written expressions, `plainto_tsquery` for plain user text,
+`websearch_to_tsquery` for search-engine syntax. Exercise 4 uses the
+third.
+
+Run: `uv run dojo test 41_gin_fulltext ex3`
+
+## Exercise 4 — search-engine syntax
+
+`ex4/solution.sql` (provided):
+
+```sql
+SELECT id
+FROM reviews
+WHERE to_tsvector('english', body)
+      @@ websearch_to_tsquery('english', 'excellent OR durable');
+```
+
+Edit `ex4/indexes.sql` — the same GIN index again.
+
+`websearch_to_tsquery` understands the syntax people actually type into
+search boxes: `"quoted phrases"`, `OR`, and `-excluded`. Everything else is
+treated as literal text, so it can never raise a syntax error on user
+input.
+
+Three exercises, one index. That is the point worth taking away: the index
+is over the *left* side of `@@` — the document — and it serves every query
+you can express against it. You do not build an index per search term; you
+build one index over the corpus.
+
+Run: `uv run dojo test 41_gin_fulltext ex4`
+
 ## The gate
 
 ```python
@@ -113,6 +165,34 @@ def test_ex2(lesson_db):
     grader.assert_rows_equal(actual, expected)
     p = explain(lesson_db, ex.solution_sql)
     grader.assert_plan(p, must_not_have=['Seq Scan'])
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
 ```
 
 ## The teaching point

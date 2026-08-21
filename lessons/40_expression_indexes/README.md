@@ -58,6 +58,61 @@ in the DDL exactly as the query spells it.
 
 Run: `uv run dojo test 40_expression_indexes ex2`
 
+## Exercise 3 — index a computed property
+
+`ex3/solution.sql` (provided) is a data-quality sweep:
+
+```sql
+SELECT id, name
+FROM customers
+WHERE length(name) = 30;
+```
+
+Edit `ex3/indexes.sql` with an index on the **expression**:
+
+```sql
+CREATE INDEX ... ON customers ((length(name)));
+```
+
+Note the double parentheses — one pair for the index's column list, one
+around the expression. PostgreSQL requires them for anything that is not a
+bare column name, and forgetting them is the most common syntax error in
+this lesson.
+
+The index stores the *computed* values, sorted. That is why the query's
+expression must match the index's expression exactly: `length(name) = 30`
+uses it, `char_length(name) = 30` does not, even though the two functions
+are the same thing.
+
+Run: `uv run dojo test 40_expression_indexes ex3`
+
+## Exercise 4 — index inside the JSON
+
+`ex4/solution.sql` (provided) hunts a value buried in three million
+clickstream payloads:
+
+```sql
+SELECT id, ts, customer_id
+FROM events
+WHERE (payload ->> 'value')::int = 999;
+```
+
+Edit `ex4/indexes.sql` with an expression index over exactly that
+expression, cast included.
+
+This is the pattern that makes a JSONB column behave like a column. The
+extraction and the cast are both immutable, so PostgreSQL can precompute
+and sort them — and the query goes from reading three million documents to
+a handful of index entries.
+
+It also has to match *exactly*. Index `(payload ->> 'value')` without the
+cast and this query will not use it, because comparing text to an integer
+is a different expression. Lesson 42's GIN index is the other approach:
+this one is precise and narrow (one key, indexed as a proper type), GIN is
+general and broad (any key, containment queries).
+
+Run: `uv run dojo test 40_expression_indexes ex4`
+
 ## The gate
 
 ```python
@@ -93,6 +148,34 @@ def test_ex2(lesson_db):
     ex = L.exercise("ex2")
     expected = ex.fetch(lesson_db, ex.expected_sql)
     baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex2",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
                                       ex.expected_sql)
     ex.apply_indexes(lesson_db)
     actual = ex.fetch(lesson_db, ex.solution_sql)

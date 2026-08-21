@@ -67,6 +67,57 @@ sorts everything. Your index should make this near-instant.
 
 Run: `uv run dojo test 35_order_by_and_indexes ex2`
 
+## Exercise 3 — one product's latest reviews
+
+`ex3/solution.sql` (provided):
+
+```sql
+SELECT id, rating, created_at
+FROM reviews
+WHERE product_id = 42
+ORDER BY created_at DESC
+LIMIT 10;
+```
+
+Edit `ex3/indexes.sql`. The gate requires **no `Seq Scan` and no `Sort`**
+in the plan.
+
+Two clauses, one index. The equality column leads so the tree can narrow to
+one product; the sort column follows so that, within that product, the
+entries are already in `created_at` order. PostgreSQL then walks ten
+entries and stops — it never sorts, and it never reads the eleventh row.
+
+Getting the `Sort` node to disappear is a different and larger win than
+making the scan fast: a sort must consume its entire input before it can
+emit the first row, so it defeats `LIMIT` completely.
+
+Run: `uv run dojo test 35_order_by_and_indexes ex3`
+
+## Exercise 4 — the newest reviews, globally
+
+`ex4/solution.sql` (provided):
+
+```sql
+SELECT id, product_id, created_at
+FROM reviews
+ORDER BY created_at DESC
+LIMIT 20;
+```
+
+Edit `ex4/indexes.sql`. Again: no `Seq Scan`, no `Sort`.
+
+No `WHERE` clause at all this time, so the index has exactly one job —
+provide the order. A single-column index is enough, and PostgreSQL will
+read it from one end and stop after twenty entries.
+
+You do not actually need `DESC` in the index definition: a B-tree can be
+walked in either direction, and the plan will say `Index Scan Backward`.
+Direction only matters when *several* sort columns disagree —
+`ORDER BY a ASC, b DESC` needs an index declared `(a ASC, b DESC)`, because
+no single walk of `(a, b)` produces that order.
+
+Run: `uv run dojo test 35_order_by_and_indexes ex4`
+
 ## The gate
 
 ```python
@@ -102,6 +153,34 @@ def test_ex2(lesson_db):
     ex = L.exercise("ex2")
     expected = ex.fetch(lesson_db, ex.expected_sql)
     baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex2",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan', 'Sort'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex3",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=['Seq Scan', 'Sort'])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
                                       ex.expected_sql)
     ex.apply_indexes(lesson_db)
     actual = ex.fetch(lesson_db, ex.solution_sql)

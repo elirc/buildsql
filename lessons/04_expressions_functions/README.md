@@ -63,6 +63,37 @@ Two columns, all 500 rows, any order.
 
 Run: `uv run dojo test 04_expressions_functions ex2`
 
+## Exercise 3 — filling a hole with COALESCE
+
+Edit `ex3/solution.sql`. The org-chart export cannot cope with a missing
+manager, so it wants a `0` where there is no one. For every staff member
+return three columns, in this order: `id`, `name`, and `manager_id` with
+NULL replaced by `0`, aliased **`manager_or_zero`**.
+
+All 500 rows, any order. Exactly one of them exercises the `coalesce` —
+find it in the output and you have found the CEO.
+
+`coalesce(a, b)` returns `a` unless `a` is NULL, in which case it returns
+`b`. It takes any number of arguments and returns the first non-NULL one.
+
+Run: `uv run dojo test 04_expressions_functions ex3`
+
+## Exercise 4 — building an SKU (and meeting the cast)
+
+Edit `ex4/solution.sql`. The warehouse needs a printable SKU for every
+product: the **first three letters of the category, upper-cased**, then a
+hyphen, then the product's `id`. For product 4242 in `books` that is
+`BOO-4242`.
+
+Two columns, in this order: `id`, and the SKU aliased **`sku`**. All 10,000
+rows, any order.
+
+Three functions compose here — `left(text, n)`, `upper(text)`, and `||` for
+concatenation — plus the trap from the concept section: `id` is an integer
+and `||` will not silently stringify it for you. Cast it with `id::text`.
+
+Run: `uv run dojo test 04_expressions_functions ex4`
+
 ## Challenge — a nested label (optional)
 
 Edit `challenge/solution.sql`. The mobile app shows compact product cards:
@@ -103,6 +134,20 @@ def test_ex1(shared_lesson_db):
 
 def test_ex2(shared_lesson_db):
     ex = L.exercise("ex2")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex3(shared_lesson_db):
+    ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected)

@@ -59,6 +59,53 @@ per page. Produce **page 3** — that is, skip the first 20, return the next
 
 Run: `uv run dojo test 03_order_limit ex3`
 
+## Exercise 4 — where do NULLs sort?
+
+Edit `ex4/solution.sql`. The org-chart tool renders the reporting tree from
+the top down, so it wants the row with **no manager first**. Return the
+**first 10** staff rows sorted by `manager_id` **ascending with NULLs
+first**, breaking ties by `id` ascending.
+
+Columns: `id`, `name`, `manager_id`. Exactly 10 rows, and the order is
+graded.
+
+By default an ascending sort puts NULLs *last* in PostgreSQL. You have to
+say `NULLS FIRST` to get the CEO to the top — and other databases pick the
+opposite default, which is why portable SQL says it explicitly.
+
+Run: `uv run dojo test 03_order_limit ex4`
+
+## Exercise 5 — top N over half a million rows
+
+Edit `ex5/solution.sql`. Finance wants the **15 largest orders ever
+placed**. Columns, in order: `id`, `customer_id`, `total`. Sort by `total`
+descending, break ties by `id` ascending. Exactly 15 rows, order graded.
+
+Exercise 1 sorted 10,000 products; this sorts 500,000 orders to return 15
+rows. Run `dojo plan 03_order_limit ex5` afterwards and look for the word
+`Sort` — you are watching PostgreSQL sort half a million rows to answer a
+question about fifteen of them. Lesson 35 removes that sort entirely with an
+index, and this is the query you will compare against.
+
+Run: `uv run dojo test 03_order_limit ex5`
+
+## Exercise 6 — a deep page
+
+Edit `ex6/solution.sql`. The product catalogue lists items **cheapest
+first**, 10 per page. Produce **page 51** — skip the first 500 rows and
+return the next 10.
+
+Sort by `price` ascending, tie-break `id` ascending. Columns: `id`, `name`,
+`price`. Exactly 10 rows, order graded.
+
+Exercise 3 asked for page 3. This one asks for page 51, and the query is
+identical except for one number — which is precisely the problem with
+`OFFSET`. To hand you rows 501–510, PostgreSQL sorts the catalogue and then
+walks past the first 500 results and throws them away. Page 5,000 would
+throw away 50,000. The reading explains what real systems do instead.
+
+Run: `uv run dojo test 03_order_limit ex6`
+
 ## Challenge — top 5 per category, no window functions (optional, hard)
 
 Edit `challenge/solution.sql`. **The 5 most expensive products in *each* of
@@ -107,6 +154,27 @@ def test_ex2(shared_lesson_db):
 
 def test_ex3(shared_lesson_db):
     ex = L.exercise("ex3")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex4(shared_lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex5(shared_lesson_db):
+    ex = L.exercise("ex5")
+    expected = ex.fetch(shared_lesson_db, ex.expected_sql)
+    actual = ex.fetch(shared_lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+
+
+def test_ex6(shared_lesson_db):
+    ex = L.exercise("ex6")
     expected = ex.fetch(shared_lesson_db, ex.expected_sql)
     actual = ex.fetch(shared_lesson_db, ex.solution_sql)
     grader.assert_rows_equal(actual, expected, ordered=True)

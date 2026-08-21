@@ -1,0 +1,30 @@
+{
+  "name": "dojo-tracks",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "One npm install for all three JavaScript dojo tracks (typescript, node, react). Not published; not a workspace root - each track dir just resolves up into this node_modules.",
+  "scripts": {
+    "test": "echo \"Run gates through the dojo CLI: uv run dojo test <track> <lesson> [ex]\" && exit 1"
+  },
+  "devDependencies": {
+    "@testing-library/dom": "^10.4.0",
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.3.0",
+    "@testing-library/user-event": "^14.6.1",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@types/supertest": "^6.0.2",
+    "@vitejs/plugin-react": "^4.4.0",
+    "express": "^5.1.0",
+    "jsdom": "^26.1.0",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "supertest": "^7.1.0",
+    "typescript": "^5.8.0",
+    "vitest": "^3.1.0",
+    "zod": "^3.25.0"
+  }
+}

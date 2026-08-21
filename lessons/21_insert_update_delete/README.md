@@ -78,6 +78,69 @@ are a brigading attack: **delete every review of product 42 with rating
 
 Run: `uv run dojo test 21_insert_update_delete ex3`
 
+## Exercise 4 — UPDATE with a join (UPDATE ... FROM)
+
+Edit `ex4/solution.sql`. Compliance is withdrawing from a market: **cancel
+every `pending` order belonging to a customer in Japan (`'JP'`)** — set
+their `status` to `'cancelled'`. Nothing else may change.
+
+The condition lives in a *different table* from the rows you are updating,
+which is what `UPDATE ... FROM` is for:
+
+```sql
+UPDATE orders o
+SET status = 'cancelled'
+FROM customers c
+WHERE c.id = o.customer_id AND ...
+```
+
+`FROM` here is not a join in the `SELECT` sense — it names extra tables the
+`WHERE` clause may reference, and the update applies to `orders` only. The
+danger is the one you now expect: forget `c.id = o.customer_id` and every
+pending order in the database matches, because the missing condition turns
+it into a cross product. Rehearse the `WHERE` as a `SELECT` in the lab
+first and read the count.
+
+Run: `uv run dojo test 21_insert_update_delete ex4`
+
+## Exercise 5 — DELETE with a join (DELETE ... USING)
+
+Edit `ex5/solution.sql`. A moderation sweep: **delete every 1-star review
+of a `garden` product whose product `id` is below 100** — and nothing
+else.
+
+`DELETE` spells its extra-tables clause `USING` rather than `FROM` (because
+`FROM` is already taken by `DELETE FROM`):
+
+```sql
+DELETE FROM reviews r
+USING products p
+WHERE p.id = r.product_id AND ...
+```
+
+Three conditions: the join key, the category, and the rating — plus the id
+bound. Miss the join key and you delete every 1-star review in the
+database. The gate counts the collateral, as it did in exercise 3.
+
+Run: `uv run dojo test 21_insert_update_delete ex5`
+
+## Exercise 6 — RETURNING what you changed
+
+Edit `ex6/solution.sql`. Clearance: set the `price` of products **11, 22
+and 33** to exactly **9.99**, and have the statement **hand back the rows
+it changed** — `id`, `name`, `price` — using `RETURNING`.
+
+One statement. The gate reads the result set your statement produced, so
+the `RETURNING` clause is graded, not just the final state.
+
+`RETURNING` is not a convenience. A follow-up `SELECT` after an `UPDATE`
+is a second round trip against a database that may have changed underneath
+you; `RETURNING` reports exactly the rows this statement touched, atomically,
+in the same round trip. It works on `INSERT`, `UPDATE` and `DELETE` alike —
+`DELETE ... RETURNING *` is how you archive rows you are about to destroy.
+
+Run: `uv run dojo test 21_insert_update_delete ex6`
+
 ## Challenge — reorder flow (INSERT ... SELECT) (optional)
 
 Edit `challenge/solution.sql`. Support wants a one-click "reorder":
@@ -165,6 +228,83 @@ def test_ex3(lesson_db):
     grader.assert_scalar(
         lesson_db, "SELECT count(*) FROM reviews",
         total - doomed, "exactly the doomed reviews were deleted - no more, no less")
+
+
+def test_ex4(lesson_db):
+    target = lesson_db.execute(
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country = 'JP' AND o.status = 'pending'").fetchone()[0]
+    cancelled_before = lesson_db.execute(
+        "SELECT count(*) FROM orders WHERE status = 'cancelled'").fetchone()[0]
+    other_pending = lesson_db.execute(
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country <> 'JP' AND o.status = 'pending'").fetchone()[0]
+    assert target > 0  # the seed guarantees Japanese pending orders exist
+
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country = 'JP' AND o.status = 'pending'",
+        0, "no pending Japanese orders remain")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM orders WHERE status = 'cancelled'",
+        cancelled_before + target,
+        "exactly the Japanese pending orders became cancelled - no more, no less")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM orders o JOIN customers c ON c.id = o.customer_id "
+        "WHERE c.country <> 'JP' AND o.status = 'pending'",
+        other_pending, "every other country's pending orders are untouched")
+
+
+def test_ex5(lesson_db):
+    doomed_sql = (
+        "SELECT count(*) FROM reviews r JOIN products p ON p.id = r.product_id "
+        "WHERE p.category = 'garden' AND p.id < 100 AND r.rating = 1")
+    doomed = lesson_db.execute(doomed_sql).fetchone()[0]
+    total = lesson_db.execute("SELECT count(*) FROM reviews").fetchone()[0]
+    assert doomed > 0  # the seed guarantees such reviews exist
+
+    ex = L.exercise("ex5")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+
+    grader.assert_scalar(lesson_db, doomed_sql, 0,
+                         "the targeted 1-star garden reviews are gone")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM reviews", total - doomed,
+        "exactly the targeted reviews were deleted - no more, no less")
+
+
+def test_ex6(lesson_db):
+    ex = L.exercise("ex6")
+    before = lesson_db.execute("SELECT count(*) FROM products").fetchone()[0]
+
+    returned = ex.fetch(lesson_db, ex.solution_sql)
+    lesson_db.commit()
+
+    assert len(returned) == 3, (
+        "RETURNING MISSING OR WRONG: the gate reads the result set your "
+        f"statement produced and got {len(returned)} row(s), expected 3.\n"
+        "  Add `RETURNING id, name, price` to your UPDATE."
+    )
+    assert all(len(r) == 3 for r in returned), (
+        "RETURNING should hand back three columns: id, name, price."
+    )
+    assert {r[0] for r in returned} == {11, 22, 33}, (
+        f"RETURNING gave ids {sorted(r[0] for r in returned)}, expected 11, 22, 33."
+    )
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM products WHERE id IN (11, 22, 33) "
+                   "AND price = 9.99",
+        3, "all three products are now priced 9.99")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM products", before,
+        "an UPDATE must not change the number of rows")
 
 
 @pytest.mark.challenge

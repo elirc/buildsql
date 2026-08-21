@@ -69,6 +69,60 @@ look at the digits you'd have shipped to accounting.
 
 Run: `uv run dojo test 24_ddl_and_types ex2`
 
+## Exercise 3 — a table that refuses nonsense
+
+Edit `ex3/solution.sql`. Create `subscriptions`:
+
+- `id` — int, primary key
+- `customer_id` — int, NOT NULL, references `customers(id)`
+- `plan` — text, NOT NULL, and **only** `'free'`, `'pro'` or `'team'`
+  are allowed (a `CHECK (plan IN (...))`)
+- `is_active` — boolean, NOT NULL, **DEFAULT true**
+- `started_at` — `timestamptz`, NOT NULL (an instant)
+- `renews_on` — `date`, nullable (a calendar concept)
+
+Four type decisions from the concept section, all in one table. `plan` is
+a closed set of values, and the CHECK is how you say so without reaching
+for an `enum` type — enums are real in PostgreSQL and genuinely awkward to
+change, so a `text` column with a CHECK is the common house style. Note
+also the deliberate split between `started_at` (an instant, so
+`timestamptz`) and `renews_on` (a date on a calendar, so `date`).
+
+The gate probes it: a row omitting `is_active` and `renews_on` must be
+accepted and default to active, and `plan = 'enterprise'` must be
+rejected.
+
+Run: `uv run dojo test 24_ddl_and_types ex3`
+
+## Exercise 4 — let the database do the arithmetic
+
+Edit `ex4/solution.sql`. Create `invoices`:
+
+- `id` — int, `GENERATED ALWAYS AS IDENTITY`, primary key
+- `subtotal` — `numeric(10,2)`, NOT NULL
+- `tax` — `numeric(10,2)`, NOT NULL
+- `total` — `numeric(10,2)`, `GENERATED ALWAYS AS (subtotal + tax) STORED`
+
+Two modern PostgreSQL features that remove a whole class of bugs.
+
+`GENERATED ALWAYS AS IDENTITY` is the standard-SQL way to say
+"auto-assign this key" — it is the successor to `serial`, and unlike
+`serial` it refuses an explicit value by default, so nobody can
+accidentally insert an id that collides with the sequence.
+
+A **generated column** is computed from other columns of the same row and
+stored. `total` can never disagree with `subtotal + tax`, because there is
+no way to write it — the gate proves this by trying, and expecting a
+rejection. Compare that with the alternative everyone has shipped at some
+point: a plain `total` column, kept in sync by application code, that
+drifts the first time somebody updates `tax` through a different code
+path.
+
+Insert with just `(subtotal, tax)`; the other two columns take care of
+themselves.
+
+Run: `uv run dojo test 24_ddl_and_types ex4`
+
 ## The gate
 
 ```python
@@ -117,6 +171,63 @@ def test_ex2(lesson_db):
     grader.assert_scalar(
         lesson_db, "SELECT sum(amount_float) = 1.0 FROM ledger",
         False, "float: ten dimes do NOT make a dollar - that's the lesson")
+
+
+def test_ex3(lesson_db):
+    ex = L.exercise("ex3")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_table(lesson_db, "subscriptions", {
+        "id": "int",
+        "customer_id": "int",
+        "plan": "text",
+        "is_active": "boolean",
+        "started_at": "timestamp with time zone",
+        "renews_on": "date",
+    })
+    catalog.assert_pk(lesson_db, "subscriptions", ["id"])
+    catalog.assert_fk(lesson_db, "subscriptions", ["customer_id"], "customers")
+    catalog.assert_not_null(lesson_db, "subscriptions", "plan")
+    catalog.assert_not_null(lesson_db, "subscriptions", "is_active")
+    catalog.assert_check(lesson_db, "subscriptions", "plan")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO subscriptions (id, customer_id, plan, started_at) "
+        "VALUES (1, 1, 'enterprise', '2023-11-14')",
+        why="'enterprise' is not one of the three plans the CHECK allows")
+    lesson_db.execute("SAVEPOINT default_probe")
+    lesson_db.execute(
+        "INSERT INTO subscriptions (id, customer_id, plan, started_at) "
+        "VALUES (1, 1, 'pro', '2023-11-14')")
+    grader.assert_scalar(
+        lesson_db, "SELECT is_active FROM subscriptions WHERE id = 1",
+        True, "is_active defaults to true when the INSERT omits it")
+    grader.assert_scalar(
+        lesson_db, "SELECT renews_on FROM subscriptions WHERE id = 1",
+        None, "renews_on is nullable and stays NULL when omitted")
+    lesson_db.execute("ROLLBACK TO SAVEPOINT default_probe")
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    lesson_db.execute(ex.solution_sql)
+    catalog.assert_table(lesson_db, "invoices", {
+        "id": "int", "subtotal": "numeric", "tax": "numeric", "total": "numeric"})
+    catalog.assert_pk(lesson_db, "invoices", ["id"])
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO invoices (subtotal, tax, total) VALUES (100.00, 20.00, 999.00)",
+        why="a generated column cannot be written - that is the entire point")
+    lesson_db.execute(
+        "INSERT INTO invoices (subtotal, tax) VALUES (100.00, 20.00), (5.50, 0.50)")
+    grader.assert_scalar(
+        lesson_db, "SELECT total FROM invoices WHERE subtotal = 100.00",
+        120, "total is computed as subtotal + tax")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(DISTINCT id) FROM invoices",
+        2, "IDENTITY assigned two distinct ids without being asked")
+    grader.assert_scalar(
+        lesson_db, "SELECT count(*) FROM invoices WHERE id IS NULL",
+        0, "IDENTITY always produces a value")
 ```
 
 ## The teaching point

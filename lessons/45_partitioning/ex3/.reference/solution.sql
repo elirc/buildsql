@@ -1,0 +1,2 @@
+CREATE TABLE events_p_dec PARTITION OF events_p
+  FOR VALUES FROM ('2023-12-01') TO ('2024-01-01');

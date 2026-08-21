@@ -1,4 +1,4 @@
-.PHONY: up down seed test status next lab plan verify reset-baseline
+.PHONY: up down seed test read status next lab plan verify reset-baseline
 
 up:
 	docker compose up -d
@@ -11,6 +11,9 @@ seed:
 
 test:
 	uv run pytest tests/
+
+read:
+	uv run dojo read $(LESSON) $(EX)
 
 status:
 	uv run dojo status

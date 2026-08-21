@@ -1,0 +1,1 @@
+-- 33_left_prefix/ex3: your CREATE INDEX here (see README.md)

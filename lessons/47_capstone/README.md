@@ -71,6 +71,83 @@ right call, and now you know why.)
 
 Run: `uv run dojo test 47_capstone ex3`
 
+## Exercise 4 — the product page's review widget
+
+`ex4/solution.sql` (provided) is the query behind every product page's
+"recent reviews" panel:
+
+```sql
+SELECT id, rating, created_at
+FROM reviews
+WHERE product_id = 42
+ORDER BY created_at DESC
+LIMIT 5;
+```
+
+Edit `ex4/indexes.sql`. The gate requires **no `Seq Scan`, no `Sort`**, and
+at least 8×.
+
+Two clauses, one index, and the sort is the part that matters: a `Sort`
+node must consume its whole input before emitting a row, so it defeats the
+`LIMIT` entirely. Get the ordering from the index and the plan reads five
+entries and stops.
+
+This is the single most valuable index shape in web applications — one
+parent, most recent N children — and it is worth being able to write
+without thinking.
+
+Run: `uv run dojo test 47_capstone ex4`
+
+## Exercise 5 — a second live migration, end to end
+
+Edit `ex5/solution.sql`. The warehouse wants a printable SKU stored on
+every product. On `products` (10,000 live rows), with lesson-28 discipline:
+
+1. add a nullable `sku` text column;
+2. backfill it, set-based, as `upper(left(category, 3)) || '-' || id::text`
+   (lesson 04's expression);
+3. flip it to `NOT NULL`;
+4. add a **unique index** on it named exactly `products_sku_key`.
+
+Four statements, in that order, and the order is the whole exercise. Add
+the column `NOT NULL` up front and PostgreSQL rejects it — there are 10,000
+existing rows with no value. Add the unique index before the backfill and
+every row collides on NULL... except it does not, because NULLs are
+distinct from each other in a unique index (lesson 25) — which is a trap
+that would let a broken migration look fine.
+
+The gate checks the column, its NOT NULL, the unique index by name, and
+spot-checks that the values were actually computed rather than filled with
+a constant.
+
+Run: `uv run dojo test 47_capstone ex5`
+
+## Exercise 6 — one more plan to read
+
+A teammate is puzzled. They added an index on `orders.status` and the
+planner refuses to use it:
+
+```sql
+EXPLAIN SELECT id, total FROM orders WHERE status = 'paid';
+```
+
+Run it in the lab (`dojo lab 47_capstone`) — with or without building that
+index first; the answer does not change. Edit `ex6/solution.sql` to return
+the node type PostgreSQL chooses for `orders`, as a single text value.
+
+Then be able to say *why*, because that is the actual exercise. Roughly
+250,000 of 500,000 orders are `paid`. Using an index would mean walking it
+and then fetching half the table's rows one page at a time, in index order —
+strictly more work than reading the table straight through. The planner is
+not ignoring the index; it is costing it correctly and declining.
+
+An index that goes unused is not always a missing statistic or a wrong
+column order. Sometimes the query wants half the table, and no index can
+make that cheap. That is what lesson 39's partial indexes and lesson 46's
+materialized views are for.
+
+Run: `uv run dojo test 47_capstone ex6`
+
 ## The gate
 
 ```python
@@ -111,13 +188,14 @@ def test_ex1(lesson_db):
 
 
 def test_ex2(lesson_db):
+    existing = lesson_db.execute("SELECT count(*) FROM orders").fetchone()[0]
     ex = L.exercise("ex2")
     lesson_db.execute(ex.solution_sql)
     catalog.assert_table(lesson_db, "orders", {"channel": "text"})
     catalog.assert_not_null(lesson_db, "orders", "channel")
     grader.assert_scalar(
         lesson_db, "SELECT count(*) FROM orders WHERE channel = 'web'",
-        500000, "every existing order backfilled to 'web'")
+        existing, "every existing order backfilled to 'web'")
     grader.assert_scalar(
         lesson_db,
         "SELECT convalidated FROM pg_constraint WHERE conname = 'orders_channel_ck'",
@@ -141,6 +219,51 @@ def test_ex3(lesson_db):
     _no_seq_scan_on(p, {"orders", "order_items"})
     measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
     grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex4(lesson_db):
+    ex = L.exercise("ex4")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    baseline = timing.cached_baseline(lesson_db, f"{L.slug}::test_ex4",
+                                      ex.expected_sql)
+    ex.apply_indexes(lesson_db)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected, ordered=True)
+    p = explain(lesson_db, ex.solution_sql)
+    grader.assert_plan(p, must_not_have=["Seq Scan", "Sort"])
+    measured = timing.measure_execution_ms(lesson_db, ex.solution_sql)
+    grader.assert_faster_than_baseline(measured, baseline, ratio=8)
+
+
+def test_ex5(lesson_db):
+    ex = L.exercise("ex5")
+    lesson_db.execute(ex.solution_sql)
+    lesson_db.commit()
+    catalog.assert_table(lesson_db, "products", {"sku": "text"})
+    catalog.assert_not_null(lesson_db, "products", "sku")
+    catalog.assert_unique(lesson_db, "products", ["sku"])
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM pg_class WHERE relname = 'products_sku_key'",
+        1, "the unique index is named products_sku_key")
+    grader.assert_scalar(
+        lesson_db,
+        "SELECT count(*) FROM products "
+        "WHERE sku <> upper(left(category, 3)) || '-' || id::text",
+        0, "every SKU is computed from that product's own category and id")
+    catalog.rejects(
+        lesson_db,
+        "INSERT INTO products (id, name, category, price, description, "
+        "attributes, sku) SELECT 99001, 'Probe', 'books', 1.00, 'x', "
+        "'{}'::jsonb, sku FROM products WHERE id = 1",
+        why="two products may not share a SKU")
+
+
+def test_ex6(lesson_db):
+    ex = L.exercise("ex6")
+    expected = ex.fetch(lesson_db, ex.expected_sql)
+    actual = ex.fetch(lesson_db, ex.solution_sql)
+    grader.assert_rows_equal(actual, expected)
 ```
 
 ## The teaching point
