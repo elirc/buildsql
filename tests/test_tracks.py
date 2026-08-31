@@ -85,14 +85,17 @@ def test_parse_exercise_id_rejects_garbage():
 # -- manifests --------------------------------------------------------------
 
 @pytest.mark.parametrize("name,n_lessons", [
-    ("typescript", 15), ("node", 15), ("react", 15), ("csharp", 17), ("dotnet", 13),
+    ("typescript", 39), ("node", 39), ("react", 39), ("csharp", 41), ("dotnet", 37),
 ])
 def test_every_manifest_loads_with_the_right_lesson_count(name, n_lessons):
-    """Loaded by path - tracks/ is deliberately not an importable package."""
+    """Loaded by path - tracks/ is deliberately not an importable package.
+
+    Counts include the Volume 2 drill parts (24 x 8-core lessons per track).
+    """
     track = tracks.get(name)
     specs = track.all_lessons()
     assert len(specs) == n_lessons
-    assert all(3 <= len(spec.core) <= 6 for spec in specs)
+    assert all(3 <= len(spec.core) <= 8 for spec in specs)
 
 
 @pytest.mark.parametrize("name", ["typescript", "node", "react", "csharp", "dotnet"])

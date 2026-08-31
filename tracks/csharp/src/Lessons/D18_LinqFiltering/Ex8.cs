@@ -1,0 +1,30 @@
+// d18_linq_filtering / ex8 - optional filters, one page, and the total behind it.
+// See lessons/d18_linq_filtering/README.md, "Exercise 8".
+
+namespace CSharpDojo.D18_LinqFiltering;
+
+// The gate builds these. Written for you.
+public record Book(string Title, string Author, int Year, decimal Price);
+
+public record SearchResult(List<Book> Page, int TotalMatches);
+
+public static class Library
+{
+    /// <summary>
+    /// Applies only the criteria that were supplied - a null author, a null
+    /// fromYear or a null maxPrice means "do not filter on that at all" -
+    /// orders what is left by Year ascending with ties broken by Title
+    /// (ordinal), and returns one 1-based page of the result together with
+    /// how many books matched in total, before the paging.
+    /// </summary>
+    public static SearchResult Search(
+        IEnumerable<Book> books,
+        string? author,
+        int? fromYear,
+        decimal? maxPrice,
+        int pageNumber,
+        int pageSize)
+    {
+        throw new NotImplementedException("ex8: Search is not implemented yet - edit this file.");
+    }
+}

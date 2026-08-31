@@ -1,0 +1,4 @@
+SELECT id, jsonb_extract_path_text(payload, 'path') AS path
+FROM events
+WHERE id <= 15
+ORDER BY id;

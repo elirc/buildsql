@@ -19,6 +19,7 @@ hook armed for the whole window so even a hard crash puts the tree back.
 from __future__ import annotations
 
 import atexit
+import json
 import os
 import re
 import shutil
@@ -183,10 +184,50 @@ def _install(source: Path, target: Path) -> None:
     os.utime(target, None)
 
 
+def _backup_dir(track: Track, spec) -> Path:
+    return track.lesson_dir(spec.slug) / ".verify_backup"
+
+
+def heal_interrupted_overlay(track: Track, spec) -> bool:
+    """Restore learner files from a previous overlay that never got to clean up.
+
+    An `atexit` hook cannot survive a hard kill (SIGKILL, session reset, shell
+    timeout), and that failure mode has destroyed shipped stubs more than once:
+    the learner files are left holding reference solutions and the next
+    pristine-fail stage reports BAD on a perfectly good lesson. The manifest
+    written by `reference_overlay` makes the interruption detectable, and this
+    runs before every overlay so the tree self-heals on the next verify.
+    """
+    bdir = _backup_dir(track, spec)
+    manifest = bdir / "manifest.json"
+    if not manifest.exists():
+        shutil.rmtree(bdir, ignore_errors=True)
+        return False
+    try:
+        entries = json.loads(manifest.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    for e in entries:
+        target = track.root / e["target"]
+        try:
+            if e["backup"] is None:
+                target.unlink(missing_ok=True)
+            else:
+                _install(bdir / e["backup"], target)
+        except OSError:
+            pass
+    shutil.rmtree(bdir, ignore_errors=True)
+    return True
+
+
 @contextmanager
 def reference_overlay(track: Track, spec):
     """Swap the author's `.reference/` files in, and always put them back."""
-    staging = Path(tempfile.mkdtemp(prefix="dojo_overlay_"))
+    if heal_interrupted_overlay(track, spec):
+        print(f"note: restored stubs left overlaid by an interrupted verify "
+              f"of {track.name}/{spec.slug}")
+    staging = _backup_dir(track, spec)
+    staging.mkdir(parents=True, exist_ok=True)
     #: (learner file, backup copy or None if the file did not exist)
     swapped: list[tuple[Path, Path | None]] = []
 
@@ -204,6 +245,11 @@ def reference_overlay(track: Track, spec):
 
     atexit.register(restore)
     try:
+        # Plan the whole swap, snapshot every learner file, and write the
+        # manifest BEFORE the first reference lands - so a kill at any point
+        # leaves either an untouched tree or a healable one.
+        planned: list[tuple[Path, Path]] = []  # (reference file, learner file)
+        entries: list[dict] = []
         for d in spec.exercise_dirs():
             refdir = track.lesson_dir(spec.slug) / d / ".reference"
             if not refdir.is_dir():
@@ -212,13 +258,21 @@ def reference_overlay(track: Track, spec):
                 if not f.is_file():
                     continue
                 target = track.learner_file(spec.slug, d, f.name)
+                planned.append((f, target))
+                name = f"{d}__{f.name}"
+                rel = str(target.relative_to(track.root))
                 if target.exists():
-                    backup = staging / f"{d}__{f.name}"
-                    shutil.copyfile(target, backup)
-                    swapped.append((target, backup))
+                    shutil.copyfile(target, staging / name)
+                    swapped.append((target, staging / name))
+                    entries.append({"target": rel, "backup": name})
                 else:
                     swapped.append((target, None))
-                _install(f, target)
+                    entries.append({"target": rel, "backup": None})
+        (staging / "manifest.json").write_text(
+            json.dumps(entries, indent=1), encoding="utf-8"
+        )
+        for f, target in planned:
+            _install(f, target)
         yield
     finally:
         restore()

@@ -4,7 +4,7 @@
 TypeScript, Node.js, React, C#, and ASP.NET Core — plus a full-stack
 interview-prep part at the end of every track.**
 
-**130 lessons. 715 graded exercises.** Every exercise is real code you write
+**310 lessons. 2,155 graded exercises.** Every exercise is real code you write
 yourself — real SQL against a real PostgreSQL 16 database, real TypeScript
 graded down to the *types*, real React graded through the accessible DOM,
 real C# and ASP.NET Core graded by xUnit through an in-process test server.
@@ -14,12 +14,12 @@ Nothing is multiple-choice.
 
 | track | alias | lessons | graded exercises | graded by |
 |---|---|---:|---:|---|
-| `sql` | (default) | 55 | 299 | pytest + PostgreSQL 16 in Docker |
-| `typescript` | `ts` | 15 | 83 | vitest, incl. type-level gates (`expectTypeOf`) |
-| `node` | | 15 | 82 | vitest + supertest |
-| `react` | | 15 | 83 | vitest + Testing Library (jsdom) |
-| `csharp` | `cs` | 17 | 97 | xUnit (`dotnet test`) |
-| `dotnet` | `net` | 13 | 71 | xUnit + WebApplicationFactory, EF Core on SQLite |
+| `sql` | (default) | 115 | 779 | pytest + PostgreSQL 16 in Docker |
+| `typescript` | `ts` | 39 | 275 | vitest, incl. type-level gates (`expectTypeOf`) |
+| `node` | | 39 | 274 | vitest + supertest |
+| `react` | | 39 | 275 | vitest + Testing Library (jsdom) |
+| `csharp` | `cs` | 41 | 289 | xUnit (`dotnet test`) |
+| `dotnet` | `net` | 37 | 263 | xUnit + WebApplicationFactory, EF Core on SQLite |
 
 Every command takes a track as its first word; with no track you get SQL, so
 every command you already know still means what it always meant.
@@ -120,6 +120,18 @@ gate that catches captive dependencies), middleware order, configuration,
 EF Core on SQLite (including a gate that fails hidden N+1 queries),
 REST CRUD, errors and logging, JWT auth and integration testing — then
 interview prep.
+
+## The drill sets (Volume 2)
+
+Every track carries a **"Drill sets" part** before its interview part — pure
+problem sets, 8 exercises each, that turn the concepts into reflexes: 24
+drill lessons per new track and 60 for SQL, nearly 1,450 exercises of fresh
+practice. Each set names the lessons it draws on ("these eight problems
+drill narrowing — redo lessons 04 and 10 if this feels like guessing"),
+ramps from direct application to interview-hard, and its `reading.md`
+explains every problem after the fact: what it was really testing, the
+classic mistake, and the model answer's reasoning. Nothing restates an
+earlier exercise — every problem is new.
 
 ## Interview prep
 

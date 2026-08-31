@@ -8,3 +8,4 @@ node_modules/
 tracks/**/bin/
 tracks/**/obj/
 *.tsbuildinfo
+.verify_backup/

@@ -1,0 +1,27 @@
+// d13_lists_dictionaries / ex4 - sorting in place versus sorting a copy.
+// See lessons/d13_lists_dictionaries/README.md, "Exercise 4".
+
+namespace CSharpDojo.D13_ListsDictionaries;
+
+public record Entry(string Player, int Score);
+
+public static class Leaderboard
+{
+    /// <summary>
+    /// Rearranges the caller's list: highest score first, ties broken by
+    /// player name A-Z. Uses List.Sort with a Comparison.
+    /// </summary>
+    public static void SortInPlace(List<Entry> entries)
+    {
+        throw new NotImplementedException("ex4: SortInPlace is not implemented yet - edit this file.");
+    }
+
+    /// <summary>
+    /// Returns a NEW list in the same order (score descending, name A-Z),
+    /// leaving the caller's list exactly as it was.
+    /// </summary>
+    public static List<Entry> Ranked(IEnumerable<Entry> entries)
+    {
+        throw new NotImplementedException("ex4: Ranked is not implemented yet - edit this file.");
+    }
+}
