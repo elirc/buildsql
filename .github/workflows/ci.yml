@@ -1,4 +1,4 @@
-name: ci
+name: IPSKILL CI
 
 on:
   push:
@@ -7,46 +7,12 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    services:
-      db:
-        image: postgres:16
-        env:
-          POSTGRES_USER: dojo
-          POSTGRES_PASSWORD: dojo
-          POSTGRES_DB: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U dojo"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-
-    env:
-      POSTGRES_HOST: 127.0.0.1
-      POSTGRES_PORT: "5432"
-      POSTGRES_USER: dojo
-      POSTGRES_PASSWORD: dojo
-      # Small template: fast CI. Speed gates auto-skip below the 2ms floor,
-      # so CI guarantees correctness/plan/lint; full-volume verification
-      # (including speed gates) runs locally before release.
-      DOJO_SCALE: "0.1"
-
     steps:
       - uses: actions/checkout@v4
-
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Install
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
-
-      - name: Seed template (scale 0.1)
-        run: uv run dojo seed
-
-      - name: Harness unit tests
-        run: uv run pytest tests/ -q
-
-      - name: Verify every lesson
-        run: uv run dojo verify
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

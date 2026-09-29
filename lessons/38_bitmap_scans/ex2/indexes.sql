@@ -1,1 +1,0 @@
--- 38_bitmap_scans/ex2: your CREATE INDEX here

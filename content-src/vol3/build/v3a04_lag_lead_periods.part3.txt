@@ -1,0 +1,847 @@
+@@@FILE ex5/prompt.md
+## Exercise 5 — one series per group
+
+Edit `ex5/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `created_at >=
+'2023-01-01'` — the eleven months January to November 2023. All four
+statuses (`cancelled`, `paid`, `pending`, `shipped`) occur in every month, so
+the rollup is 44 rows.
+
+Operations wants month-over-month movement **per status**. The comparison
+must stay inside a status: `paid`'s January has no previous month, and it
+certainly must not borrow `cancelled`'s November.
+
+Illustration across a status boundary:
+
+```
+   month    | status    | revenue   | prev_in_status | delta
+------------+-----------+-----------+----------------+----------
+ 2023-10-01 | cancelled | 3900000.00|      4050000.00| -150000.00
+ 2023-11-01 | cancelled | 1800000.00|      3900000.00|-2100000.00
+ 2023-01-01 | paid      |21000000.00|                |
+ 2023-02-01 | paid      |19500000.00|     21000000.00|-1500000.00
+```
+
+The third row is the test. Its `prev_in_status` is empty because it is the
+first month of its own series — not `1800000.00`, which is what an
+unpartitioned `lag` would put there. Four rows in your result have a NULL
+`prev_in_status`, one per status.
+
+Columns, in this order: `month` (a `date`), `status`, `revenue`,
+`prev_in_status` (the previous month's revenue for the same status, NULL for
+each status's first month), `delta` (`revenue` minus `prev_in_status`).
+
+**Ordered by `status` ascending, then `month` ascending.** (44 rows.)
+
+```
+uv run dojo test v3a04_lag_lead_periods ex5
+```
+@@@FILE ex5/hints.md
+## Hint 1
+
+Four independent time series share one result set. The window needs to know
+where one ends and the next begins, and there is exactly one clause for
+that.
+
+## Hint 2
+
+```sql
+lag(revenue) OVER (PARTITION BY status ORDER BY month)
+```
+
+`PARTITION BY` restarts the window at every status, so the first row of each
+status has no predecessor and `lag` returns NULL there.
+
+## Hint 3
+
+Roll up to (`month`, `status`) with `GROUP BY 1, 2` first. Note that the
+statement's final `ORDER BY status, month` is a separate thing from the
+window's `PARTITION BY status ORDER BY month` — they happen to line up here,
+which is convenient and not required. The decision left to you: does the
+window still work if you sort the output by `month, status` instead? Try it
+and see why the answer is yes.
+@@@FILE ex5/importantHints.md
+## Hint 1
+
+Count the NULLs. A correct answer has exactly four NULL `prev_in_status`
+values — the first month of each status. An unpartitioned `lag` has exactly
+one, on whichever row sorts first overall. That count is the fastest
+diagnosis available and it does not require reading a single revenue figure.
+
+## Hint 2
+
+Here is what the bug looks like when it ships. Without the partition, the
+January `paid` row takes its previous value from the November `cancelled`
+row, and its delta is the difference between two unrelated series — a large
+number, in the right units, sitting in a plausible place on a dashboard.
+Nobody notices for a quarter. This is the archetype of a window-function bug:
+no error, no NULL, just a wrong number.
+
+## Hint 3
+
+One structural note. You may compute `prev_in_status` in a CTE and subtract
+in the outer query, or write the `lag` twice in one select list. If you take
+the second route, make sure both `lag` calls carry the `PARTITION BY` —
+copying one and editing the other is exactly how half-partitioned queries
+get written.
+@@@FILE ex5/solution.sql
+-- v3a04_lag_lead_periods / ex5 — month-over-month inside each status.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+),
+with_prev AS (
+    SELECT month,
+           status,
+           revenue,
+           lag(revenue) OVER (PARTITION BY status ORDER BY month) AS prev_in_status
+    FROM monthly
+)
+SELECT month,
+       status,
+       revenue,
+       prev_in_status,
+       revenue - prev_in_status AS delta
+FROM with_prev
+ORDER BY status, month;
+@@@FILE ex5/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+)
+SELECT m.month,
+       m.status,
+       m.revenue,
+       p.revenue             AS prev_in_status,
+       m.revenue - p.revenue AS delta
+FROM monthly m
+LEFT JOIN monthly p
+       ON p.status = m.status
+      AND p.month  = m.month - INTERVAL '1 month'
+ORDER BY m.status, m.month;
+@@@FILE ex6/prompt.md
+## Exercise 6 — baselines and the last_value trap
+
+Edit `ex6/solution.sql`.
+
+Works against the same 44-row rollup as exercise 5: `orders` restricted to
+`created_at >= '2023-01-01'`, grouped to (`month`, `status`).
+
+Finance wants each status indexed against its own starting point: January =
+100, and every later month expressed as a percentage of it. They also want
+the status's final month on every row, for the footer of the chart.
+
+`first_value` and `last_value` both read a row out of the **frame** — unlike
+`lag` and `lead`, which ignore it. The default frame runs from the start of
+the partition to the current row, so `first_value` is accidentally right and
+`last_value` returns the current row's own revenue. Both columns need a
+frame that spans the whole partition.
+
+Illustration for one status:
+
+```
+   month    | status | revenue   | first_month | last_month | index_vs_first
+------------+--------+-----------+-------------+------------+---------------
+ 2023-01-01 | paid   |21000000.00| 21000000.00 | 20400000.00|         100.00
+ 2023-02-01 | paid   |19500000.00| 21000000.00 | 20400000.00|          92.86
+ 2023-03-01 | paid   |22050000.00| 21000000.00 | 20400000.00|         105.00
+ 2023-11-01 | paid   |20400000.00| 21000000.00 | 20400000.00|          97.14
+```
+
+`first_month` and `last_month` are constant within a status. If your
+`last_month` column equals `revenue` on every row, you have met the default
+frame.
+
+Columns, in this order: `month` (a `date`), `status`, `revenue`,
+`first_month` (that status's earliest month's revenue), `last_month` (that
+status's latest month's revenue), `index_vs_first` (100 × `revenue` ÷
+`first_month`, rounded to 2 decimals).
+
+**Ordered by `status` ascending, then `month` ascending.** (44 rows.)
+
+```
+uv run dojo test v3a04_lag_lead_periods ex6
+```
+@@@FILE ex6/hints.md
+## Hint 1
+
+Both new value columns are "a specific row of this status", not "a row near
+me". That is a different kind of question from `lag`, and it is answered by
+a different pair of functions — ones that care about the frame.
+
+## Hint 2
+
+```sql
+first_value(revenue) OVER w
+last_value(revenue)  OVER w
+WINDOW w AS (PARTITION BY status ORDER BY month
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+```
+
+Name the window once and both columns are guaranteed to share the frame.
+
+## Hint 3
+
+The `ORDER BY` inside the window is still required, even with an unbounded
+frame — "first" and "last" are meaningless without an order. The decision
+left to you is whether to write the frame at all: an alternative spelling of
+`last_value` is `first_value(revenue) OVER (PARTITION BY status ORDER BY
+month DESC)`, which is correct and which the next reader has to think about.
+Pick the one you would defend in review.
+@@@FILE ex6/importantHints.md
+## Hint 1
+
+Write the wrong version first, deliberately, and look at it:
+
+```sql
+first_value(revenue) OVER (PARTITION BY status ORDER BY month) AS first_month,
+last_value(revenue)  OVER (PARTITION BY status ORDER BY month) AS last_month
+```
+
+`first_month` is right. `last_month` is a copy of `revenue`. One query, one
+frame, two functions, and only one of them exposes the problem — which is
+precisely why this bug survives code review.
+
+## Hint 2
+
+The explanation, once more in frame terms: with an `ORDER BY` and no frame
+clause the frame is `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. On
+the March row of `paid`, the frame is January through March. The last value
+of January-through-March is March. The function is correct; your expectation
+was about the partition, and the frame was about the rows so far.
+
+## Hint 3
+
+Once the frame spans the partition, notice what else becomes available over
+the same window: `sum(revenue) OVER w` is the status's full-year total,
+`max(revenue) OVER w` is its best month, `nth_value(revenue, 2) OVER w` is
+February. All from one named window, one sort, one pass. That composability
+is the reason to fix the frame rather than to add a join.
+@@@FILE ex6/solution.sql
+-- v3a04_lag_lead_periods / ex6 — first and last of each status, with a real frame.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+)
+SELECT month,
+       status,
+       revenue,
+       first_value(revenue) OVER w AS first_month,
+       last_value(revenue)  OVER w AS last_month,
+       round(100 * revenue / first_value(revenue) OVER w, 2) AS index_vs_first
+FROM monthly
+WINDOW w AS (PARTITION BY status ORDER BY month
+             ROWS BETWEEN UNBOUNDED PRECEDING
+                      AND UNBOUNDED FOLLOWING)
+ORDER BY status, month;
+@@@FILE ex6/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+),
+edges AS (
+    SELECT status,
+           min(month) AS first_m,
+           max(month) AS last_m
+    FROM monthly
+    GROUP BY status
+),
+anchored AS (
+    SELECT e.status,
+           (SELECT x.revenue FROM monthly x
+             WHERE x.status = e.status AND x.month = e.first_m) AS first_month,
+           (SELECT y.revenue FROM monthly y
+             WHERE y.status = e.status AND y.month = e.last_m)  AS last_month
+    FROM edges e
+)
+SELECT m.month,
+       m.status,
+       m.revenue,
+       a.first_month,
+       a.last_month,
+       round(100 * m.revenue / a.first_month, 2) AS index_vs_first
+FROM monthly m
+JOIN anchored a ON a.status = m.status
+ORDER BY m.status, m.month;
+@@@FILE ex7/prompt.md
+## Exercise 7 — the gap between two events
+
+Edit `ex7/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`. Restrict to `customer_id BETWEEN 1
+AND 10` — ten customers with roughly ten orders each, so the result is small
+enough to read.
+
+Retention wants, for every order, when that customer's previous order was
+and how many days elapsed. Each customer is their own series: a customer's
+first order has no predecessor, and it must not borrow the previous
+customer's last order.
+
+Illustration for two customers:
+
+```
+ customer_id | id     | created_at             | prev_at                | days_since_prev
+-------------+--------+------------------------+------------------------+----------------
+           1 |  10432 | 2022-11-20 08:14:00+00 |                        |
+           1 |  88120 | 2022-12-04 19:02:00+00 | 2022-11-20 08:14:00+00 |           14.45
+           1 | 201933 | 2023-03-11 06:41:00+00 | 2022-12-04 19:02:00+00 |           96.49
+           2 |   7741 | 2022-11-16 12:00:00+00 |                        |
+           2 | 145002 | 2023-01-02 03:30:00+00 | 2022-11-16 12:00:00+00 |           46.65
+```
+
+Customer 2's first row restarts: NULL, not "four months since customer 1's
+last order".
+
+Subtracting two `timestamptz` values gives an `interval`, not a number. To
+get days as a rounded decimal, flatten it with `extract(epoch FROM ...)`,
+divide by 86400, and cast to `numeric` before rounding — `round(double
+precision, integer)` does not exist, and whether `extract` hands you a
+double depends on the server version. Casting makes the query
+version-independent.
+
+Order the window by `created_at, id`: two orders can share a timestamp, and
+`lag` over a non-unique ordering returns one of the tied rows without
+telling you which.
+
+Columns, in this order: `customer_id`, `id` (the order id), `created_at`,
+`prev_at` (the customer's previous order timestamp, NULL for their first),
+`days_since_prev` (elapsed days, rounded to 2 decimals, NULL for their
+first).
+
+**Ordered by `customer_id` ascending, then `created_at` ascending, then `id`
+ascending.**
+
+```
+uv run dojo test v3a04_lag_lead_periods ex7
+```
+@@@FILE ex7/hints.md
+## Hint 1
+
+No aggregation this time — the grain of the report is already the grain of
+the table. One window column, one arithmetic column, and a partition so the
+customers do not bleed into each other.
+
+## Hint 2
+
+```sql
+lag(created_at) OVER (PARTITION BY customer_id ORDER BY created_at, id)
+```
+
+`lag` works on any type, not just numbers. The subtraction that follows is
+what needs care.
+
+## Hint 3
+
+`created_at - prev_at` is an `interval`. `extract(epoch FROM interval)` is
+the number of seconds it represents. Divide by 86400 for days, cast to
+`numeric`, then round. The decision left to you: cast the epoch result or
+the whole quotient? Either works — but do it before `round`, not after, or
+the function will not resolve.
+@@@FILE ex7/importantHints.md
+## Hint 1
+
+Predict the NULLs. Ten customers, so exactly ten rows have a NULL `prev_at`
+— one per customer, their first order. If your count is one, the partition
+is missing. If it is zero, something has defaulted the edge.
+
+## Hint 2
+
+Now the type error you are about to meet. Try this and read the message:
+
+```sql
+round(extract(epoch FROM created_at - prev_at) / 86400, 2)
+```
+
+On some servers it works. On others: `function round(double precision,
+integer) does not exist`. PostgreSQL has a one-argument `round` for doubles
+and a two-argument `round` only for `numeric`. The fix is a cast, and the
+habit is to write the cast every time rather than to remember which servers
+need it.
+
+## Hint 3
+
+One correctness detail that is easy to skip: the tie-break in the window's
+`ORDER BY`. If a customer has two orders with identical `created_at`
+values — plausible for an order placed by a script — then `ORDER BY
+created_at` alone leaves their relative position undefined, and `lag`
+returns one of them arbitrarily. Adding `, id` makes the series total. This
+is the same rule that governed `row_number` in sector v3a02_ranking_top_n,
+arriving from a different direction.
+@@@FILE ex7/solution.sql
+-- v3a04_lag_lead_periods / ex7 — elapsed time between a customer's orders.
+WITH ordered AS (
+    SELECT customer_id,
+           id,
+           created_at,
+           lag(created_at) OVER (PARTITION BY customer_id
+                                 ORDER BY created_at, id) AS prev_at
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 10
+)
+SELECT customer_id,
+       id,
+       created_at,
+       prev_at,
+       round(extract(epoch FROM created_at - prev_at)::numeric / 86400, 2)
+           AS days_since_prev
+FROM ordered
+ORDER BY customer_id, created_at, id;
+@@@FILE ex7/expected.sql
+WITH mine AS (
+    SELECT customer_id, id, created_at
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 10
+),
+paired AS (
+    SELECT m.customer_id,
+           m.id,
+           m.created_at,
+           (SELECT max(p.created_at)
+              FROM mine p
+             WHERE p.customer_id = m.customer_id
+               AND (p.created_at, p.id) < (m.created_at, m.id)) AS prev_at
+    FROM mine m
+)
+SELECT customer_id,
+       id,
+       created_at,
+       prev_at,
+       round((extract(epoch FROM created_at) - extract(epoch FROM prev_at))::numeric
+             / 86400, 2) AS days_since_prev
+FROM paired
+ORDER BY customer_id, created_at, id;
+@@@FILE ex8/prompt.md
+## Exercise 8 — looking both ways
+
+Edit `ex8/solution.sql`.
+
+Works against `events(id bigint, customer_id int, event_type text, payload
+jsonb, ts timestamptz)`, restricted to `event_type = 'purchase'` and rolled
+up to one row per day with `date_trunc('day', ts)::date`.
+
+Analytics wants the **local peaks**: days that beat both the day before and
+the day after. The first and last days of the series can never qualify —
+they are missing one of their two neighbours, and a comparison against NULL
+is unknown, not true.
+
+Illustration on six days, where only one qualifies:
+
+```
+    day     | purchases | prev_day | next_day
+------------+-----------+----------+----------
+ 2023-10-14 |      6900 |     5200 |     3300
+```
+
+That row is in the output because 6900 > 5200 and 6900 > 3300. The
+surrounding days are not, and neither is 2023-10-11 (no previous day) or the
+final day (no next day).
+
+The comparison cannot live in `WHERE`: window functions are computed after
+`WHERE` runs, so `WHERE purchases > lag(purchases) OVER (...)` is a syntax
+error. Compute both neighbours at one query level and filter at the next.
+
+Columns, in this order: `day` (a `date`), `purchases`, `prev_day`,
+`next_day`. Keep only the strict local peaks.
+
+**Ordered by `day` ascending.**
+
+```
+uv run dojo test v3a04_lag_lead_periods ex8
+```
+@@@FILE ex8/hints.md
+## Hint 1
+
+A row needs to know two things about its neighbours. There are two functions
+for that, they take the same window, and they can appear in the same select
+list.
+
+## Hint 2
+
+```sql
+lag(x)  OVER (ORDER BY d) AS before,
+lead(x) OVER (ORDER BY d) AS after
+```
+
+`lead` is `lag` pointing the other way; its NULL lands at the end of the
+partition instead of the beginning.
+
+## Hint 3
+
+Two query levels: the inner one computes `prev_day` and `next_day`, the
+outer one filters. Write the filter as two strict comparisons joined with
+`AND`. The decision left to you is whether to handle the edge rows
+explicitly — you do not need to, because `6900 > NULL` evaluates to unknown
+and `WHERE` keeps only rows where the predicate is *true*, so the first and
+last rows drop out on their own.
+@@@FILE ex8/importantHints.md
+## Hint 1
+
+Reason about the edges before you write any condition for them. On the first
+row, `prev_day` is NULL. `purchases > NULL` is unknown. `unknown AND
+anything` is unknown or false, never true. `WHERE` discards it. So SQL's
+three-valued logic — which is a nuisance in sector 05 — is doing exactly the
+right thing here for free. Adding `AND prev_day IS NOT NULL` is harmless and
+redundant; know that it is redundant.
+
+## Hint 2
+
+The error you get if you try to skip a query level:
+
+```
+ERROR:  window functions are not allowed in WHERE
+LINE 4: WHERE purchases > lag(purchases) OVER (ORDER BY day)
+```
+
+The reason is evaluation order, not a missing feature: `WHERE` runs before
+windowing, so the value does not exist yet. Every "filter on a window
+result" query in SQL is two levels deep because of that sentence — the same
+rule that forced the top-N shape in sector v3a02_ranking_top_n.
+
+## Hint 3
+
+A design question worth a moment: should a day that *ties* with a neighbour
+count as a peak? The prompt says strict — `>` on both sides — so a plateau
+produces no peak at all. Using `>=` instead would report every day of a
+plateau as a peak, which is a different and defensible answer to a different
+question. Whichever you pick, the query should say which.
+@@@FILE ex8/solution.sql
+-- v3a04_lag_lead_periods / ex8 — days that beat both neighbours.
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day,
+           count(*)                    AS purchases
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY 1
+),
+neighbours AS (
+    SELECT day,
+           purchases,
+           lag(purchases)  OVER (ORDER BY day) AS prev_day,
+           lead(purchases) OVER (ORDER BY day) AS next_day
+    FROM daily
+)
+SELECT day,
+       purchases,
+       prev_day,
+       next_day
+FROM neighbours
+WHERE purchases > prev_day
+  AND purchases > next_day
+ORDER BY day;
+@@@FILE ex8/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day,
+           count(*)                    AS purchases
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY 1
+),
+neighbours AS (
+    SELECT d.day,
+           d.purchases,
+           (SELECT p.purchases FROM daily p WHERE p.day = d.day - 1) AS prev_day,
+           (SELECT n.purchases FROM daily n WHERE n.day = d.day + 1) AS next_day
+    FROM daily d
+)
+SELECT day,
+       purchases,
+       prev_day,
+       next_day
+FROM neighbours
+WHERE prev_day IS NOT NULL
+  AND next_day IS NOT NULL
+  AND purchases > prev_day
+  AND purchases > next_day
+ORDER BY day;
+@@@FILE challenge/prompt.md
+## Challenge — months that went backwards
+
+Edit `challenge/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `created_at >=
+'2023-01-01'` and rolled up to (`month`, `status`) — 44 rows before
+filtering.
+
+Operations wants an exception report rather than a dashboard: only the
+months where a status's revenue fell by **more than five percent** against
+its own previous month. Everything else is noise.
+
+Three things have to be right at once. The `lag` must be partitioned by
+status. The percentage must be guarded against a zero denominator. And the
+filter must live outside the window, because a window function cannot appear
+in `WHERE`.
+
+Illustration of what qualifies and what does not:
+
+```
+   month    | status    | revenue    | prev_revenue | pct_change
+------------+-----------+------------+--------------+-----------
+ 2023-02-01 | paid      |19500000.00 |  21000000.00 |      -7.14   <- kept
+ 2023-03-01 | paid      |22050000.00 |  19500000.00 |      13.08   <- dropped
+ 2023-11-01 | cancelled | 1800000.00 |   3900000.00 |     -53.85   <- kept
+```
+
+A fall of exactly five percent does **not** qualify — the threshold is
+strict. A month with no previous month has a NULL `pct_change` and is
+dropped by the comparison without needing a special case.
+
+Columns, in this order: `month` (a `date`), `status`, `revenue`,
+`prev_revenue`, `pct_change` (100 × (`revenue` − `prev_revenue`) ÷
+`prev_revenue`, rounded to 2 decimals).
+
+**Ordered by `status` ascending, then `month` ascending.**
+
+```
+uv run dojo test v3a04_lag_lead_periods challenge
+```
+@@@FILE challenge/hints.md
+## Hint 1
+
+Three query levels fall out naturally: aggregate, annotate, filter. Trying
+to do the last two at once is what produces the error.
+
+## Hint 2
+
+The annotate stage, complete:
+
+```sql
+SELECT month, status, revenue,
+       lag(revenue) OVER (PARTITION BY status ORDER BY month) AS prev_revenue
+FROM monthly
+```
+
+Everything after that is ordinary arithmetic on ordinary columns.
+
+## Hint 3
+
+Filter on the *rounded* percentage or on the raw one? They differ on a month
+that falls by 5.004 percent — rounded it is `-5.00` and fails a strict
+`< -5` test, unrounded it passes. The prompt shows the rounded value in the
+output, which does not tell you which one the filter uses. Decide, and be
+able to say why; the safest reading of "fell by more than five percent" is
+the unrounded comparison, with rounding applied only for display.
+@@@FILE challenge/importantHints.md
+## Hint 1
+
+Build it in three runs rather than one. First run: the 44-row rollup, and
+check the row count. Second run: add `prev_revenue` and check that exactly
+four rows are NULL. Third run: add the percentage and the filter. Debugging
+a three-stage query by writing all three stages and then reading the error
+is the slow way.
+
+## Hint 2
+
+An alternative that avoids the extra query level, and is worth knowing about
+even though it is longer: compute the previous revenue with a correlated
+subquery instead of a window, and then the filter *can* live in `WHERE`,
+because a subquery is not a window function. It is slower — one lookup per
+row instead of one pass — but it demonstrates that the two-level rule is
+about windows specifically, not about derived values in general.
+
+## Hint 3
+
+Think about what the report does *not* show, because that is usually the
+review question. A status that disappeared entirely in a month has no row in
+the rollup at all, so it cannot appear as a hundred-percent fall — it is
+simply absent. If the report is meant to catch that, the rollup needs a
+calendar spine (sector v3a03_running_totals) so that a missing month becomes
+a zero rather than a gap. On this dataset every status occurs every month,
+so the question is hypothetical here and very much not hypothetical in
+production.
+@@@FILE challenge/solution.sql
+-- v3a04_lag_lead_periods / challenge — statuses that fell more than 5% in a month.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+),
+with_prev AS (
+    SELECT month,
+           status,
+           revenue,
+           lag(revenue) OVER (PARTITION BY status ORDER BY month) AS prev_revenue
+    FROM monthly
+)
+SELECT month,
+       status,
+       revenue,
+       prev_revenue,
+       round(100 * (revenue - prev_revenue) / nullif(prev_revenue, 0), 2) AS pct_change
+FROM with_prev
+WHERE 100 * (revenue - prev_revenue) / nullif(prev_revenue, 0) < -5
+ORDER BY status, month;
+@@@FILE challenge/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+)
+SELECT m.month,
+       m.status,
+       m.revenue,
+       p.revenue AS prev_revenue,
+       round(100 * (m.revenue - p.revenue) / nullif(p.revenue, 0), 2) AS pct_change
+FROM monthly m
+JOIN monthly p
+  ON p.status = m.status
+ AND p.month  = m.month - INTERVAL '1 month'
+WHERE p.revenue <> 0
+  AND m.revenue < p.revenue * 0.95
+ORDER BY m.status, m.month;
+@@@FILE review1/prompt.md
+## Spaced review
+
+Edit `review1/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 61 people in
+`finance`. Hire dates are spread over ten years, so the series is sparse and
+irregular — which is fine, because this report is about the gaps themselves.
+
+HR wants each finance hire beside the *next* hire after them and how many
+days passed. The most recent hire has no successor, so both of those columns
+are NULL for exactly one row.
+
+`lead` is `lag` pointing forwards: the NULL lands at the end of the series
+instead of the beginning.
+
+Illustration on four hires:
+
+```
+ id | hired_on   | next_hired_on | days_to_next
+----+------------+---------------+-------------
+  7 | 2015-03-02 | 2015-04-11    |           40
+ 12 | 2015-04-11 | 2016-11-30    |          599
+  4 | 2016-11-30 | 2016-11-30    |            0
+ 31 | 2016-11-30 |               |
+```
+
+Rows three and four share a hire date, which is why the window's `ORDER BY`
+needs `id` as a tie-break: without it, the order between them — and
+therefore which one gets the NULL — is undefined.
+
+Note that `date - date` in PostgreSQL yields an integer number of days
+directly, with no `extract` and no cast required.
+
+Columns, in this order: `id`, `name`, `hired_on`, `next_hired_on` (the next
+finance hire's date, NULL for the most recent hire), `days_to_next`
+(`next_hired_on - hired_on`, an integer, NULL for the most recent hire).
+
+**Ordered by `hired_on` ascending, then `id` ascending.** (61 rows.)
+
+```
+uv run dojo test v3a04_lag_lead_periods review1
+```
+@@@FILE review1/hints.md
+## Hint 1
+
+Same construction as the rest of the sector, pointed the other way. Nothing
+is aggregated: the grain of the report is already one row per person.
+
+## Hint 2
+
+```sql
+lead(hired_on) OVER (ORDER BY hired_on, id)
+```
+
+`lead(x)` is the value of `x` one row later in window order, or NULL if
+there is no such row.
+
+## Hint 3
+
+Two `date` values subtract to an `integer` — days — so `days_to_next` needs
+no `extract`, no division and no cast. That is a real difference from
+exercise 7, where the operands were `timestamptz` and the result was an
+`interval`. The decision left to you is whether to compute `lead` once in a
+CTE or twice in one select list; both are correct, and only one of them lets
+you name the intermediate value.
+@@@FILE review1/importantHints.md
+## Hint 1
+
+Predict the NULLs first. Exactly one row — the most recently hired person in
+finance — has NULL in both new columns. If you have more than one, check
+whether you accidentally partitioned by something; if you have none, check
+whether you used `lag` instead of `lead`.
+
+## Hint 2
+
+Look hard at the two people sharing a hire date in the illustration. The
+first of them has `days_to_next = 0`, which is correct and looks like a bug.
+Whether id 4 or id 31 gets the zero is decided entirely by the tie-break in
+the window's `ORDER BY` — remove it and the answer becomes whatever the sort
+happened to produce. Ties are where "it worked on my machine" comes from.
+
+## Hint 3
+
+Worth noticing on the way out: this same query, with `lag` instead of
+`lead`, answers "how long since the previous hire" and puts the NULL at the
+other end. The two reports are the same data read in opposite directions,
+and choosing between them is a presentation decision rather than a technical
+one — except for one thing, which sector v3a04's reading covers: `lead`
+forces the executor to buffer rows it has not yet emitted, so on very large
+partitions the backward-looking version is the cheaper of the two.
+@@@FILE review1/solution.sql
+-- v3a04_lag_lead_periods / review1 — the gap to the next finance hire.
+WITH fin AS (
+    SELECT id,
+           name,
+           hired_on,
+           lead(hired_on) OVER (ORDER BY hired_on, id) AS next_hired_on
+    FROM staff
+    WHERE department = 'finance'
+)
+SELECT id,
+       name,
+       hired_on,
+       next_hired_on,
+       next_hired_on - hired_on AS days_to_next
+FROM fin
+ORDER BY hired_on, id;
+@@@FILE review1/expected.sql
+WITH fin AS (
+    SELECT id, name, hired_on
+    FROM staff
+    WHERE department = 'finance'
+),
+paired AS (
+    SELECT f.id,
+           f.name,
+           f.hired_on,
+           (SELECT min(n.hired_on)
+              FROM fin n
+             WHERE (n.hired_on, n.id) > (f.hired_on, f.id)) AS next_hired_on
+    FROM fin f
+)
+SELECT id,
+       name,
+       hired_on,
+       next_hired_on,
+       next_hired_on - hired_on AS days_to_next
+FROM paired
+ORDER BY hired_on, id;

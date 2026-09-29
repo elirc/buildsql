@@ -1,0 +1,1 @@
+The garbage collector is not a mystery box you tune with flags; it is a cost you create, one allocation at a time. This sector makes that cost visible: bytes per operation, gen0 collections, the 85,000-byte cliff, pooled buffers, weak caches, and why a finalizer is the most expensive thing you can add to a type.

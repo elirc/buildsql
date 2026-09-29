@@ -1,0 +1,527 @@
+@@@FILE ex1/prompt.md
+## Exercise 1 — the latest row, ranked
+
+Edit `ex1/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)` — 500,000 rows. Restrict to
+`customer_id BETWEEN 1 AND 20`; those twenty customers have roughly ten
+orders each.
+
+Support wants each customer's most recent order. Exactly one row per
+customer, and the same row every time the query runs — so the ordering that
+chooses it must be **total**: `created_at DESC`, then `id DESC` as the
+tie-break, on the theory that a higher id was inserted later.
+
+Illustration for two customers:
+
+```
+ customer_id | id     | created_at             | total
+-------------+--------+------------------------+---------
+           1 | 411902 | 2023-09-14 11:02:00+00 | 1204.50
+           2 | 388771 | 2023-10-02 06:31:00+00 |  318.90
+```
+
+Twenty customers in the range, so twenty rows — unless one of them has never
+ordered, in which case they simply do not appear. This query returns the
+latest *orders*, not a row per customer id.
+
+Remember that a window function cannot be filtered in `WHERE`; the ranking
+has to happen one query level down from the filter.
+
+Columns, in this order: `customer_id`, `id` (the order id), `created_at`,
+`total`.
+
+**Ordered by `customer_id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex1
+```
+@@@FILE ex1/hints.md
+## Hint 1
+
+Number each customer's orders from most recent to least recent, then keep
+the ones numbered 1. Two steps, two query levels.
+
+## Hint 2
+
+```sql
+row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC, id DESC)
+```
+
+The partition restarts the numbering per customer; the ordering decides
+which order gets number 1.
+
+## Hint 3
+
+Put that in a CTE or subquery and filter `WHERE rn = 1` outside it. The
+decision left to you: does the tie-break belong in the window's `ORDER BY`
+or in the statement's? Both, potentially — but only one of them affects
+*which row survives*, and that is the one that matters.
+@@@FILE ex1/importantHints.md
+## Hint 1
+
+Ask what happens without the tie-break. If a customer has two orders with
+identical `created_at`, `ORDER BY created_at DESC` alone leaves their
+relative position undefined; `row_number` assigns 1 to one of them, and
+which one can change when the plan changes. The query still returns twenty
+rows, still looks right, and is not reproducible. Reproducibility is the
+whole reason for the second sort column.
+
+## Hint 2
+
+The version everyone writes first, and why it is worse:
+
+```sql
+SELECT o.* FROM orders o
+JOIN (SELECT customer_id, max(created_at) AS m
+      FROM orders WHERE customer_id BETWEEN 1 AND 20
+      GROUP BY customer_id) x
+  ON x.customer_id = o.customer_id AND o.created_at = x.m;
+```
+
+It returns *two* rows for any customer whose latest timestamp is shared, so
+the result can be twenty-one rows long. Exercise 4 is about finding exactly
+those customers.
+
+## Hint 3
+
+Where should `WHERE customer_id BETWEEN 1 AND 20` go — inside the ranking
+level or outside it? Inside. Filtering to whole partitions before the window
+runs cannot change any surviving row's rank, and it means the window sorts
+two hundred rows instead of half a million. It is also the one class of
+predicate PostgreSQL can push through a window node on its own.
+@@@FILE ex1/solution.sql
+-- v3a06_dedup_latest_row / ex1 — the latest order per customer, by ranking.
+WITH ranked AS (
+    SELECT customer_id,
+           id,
+           created_at,
+           total,
+           row_number() OVER (PARTITION BY customer_id
+                              ORDER BY created_at DESC, id DESC) AS rn
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 20
+)
+SELECT customer_id,
+       id,
+       created_at,
+       total
+FROM ranked
+WHERE rn = 1
+ORDER BY customer_id;
+@@@FILE ex1/expected.sql
+SELECT DISTINCT ON (customer_id)
+       customer_id,
+       id,
+       created_at,
+       total
+FROM orders
+WHERE customer_id BETWEEN 1 AND 20
+ORDER BY customer_id, created_at DESC, id DESC;
+@@@FILE ex2/prompt.md
+## Exercise 2 — the same thing with DISTINCT ON
+
+Edit `ex2/solution.sql`.
+
+Works against the same slice of `orders`: `customer_id BETWEEN 1 AND 20`.
+
+This time the question is each customer's **first** order, and the tool is
+PostgreSQL's `DISTINCT ON` — a non-standard extension that expresses "one
+row per key" in a single query level.
+
+The rule: the statement's `ORDER BY` must **begin** with the same
+expressions as `DISTINCT ON`, in the same order. Everything after that
+decides which row of each group survives. Break the rule and PostgreSQL
+raises `SELECT DISTINCT ON expressions must match initial ORDER BY
+expressions`. Omit the discriminating part and PostgreSQL keeps an arbitrary
+row per group with no complaint at all — which is the more dangerous of the
+two failures.
+
+Here the discriminating part is `created_at` ascending, then `id` ascending
+as a tie-break.
+
+Illustration for two customers:
+
+```
+ customer_id | id     | created_at             | total
+-------------+--------+------------------------+--------
+           1 |  10432 | 2022-11-20 08:14:00+00 | 640.20
+           2 |   7741 | 2022-11-16 12:00:00+00 | 918.75
+```
+
+Columns, in this order: `customer_id`, `id` (the order id), `created_at`,
+`total`.
+
+**Ordered by `customer_id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex2
+```
+@@@FILE ex2/hints.md
+## Hint 1
+
+One query level this time, no subquery. All the work happens in two clauses
+at the top and bottom of the statement, and they have to agree with each
+other.
+
+## Hint 2
+
+```sql
+SELECT DISTINCT ON (category) category, id, price
+FROM products
+ORDER BY category, price DESC, id;
+```
+
+"One row per category, and within each category the one that sorts first
+under the rest of the ordering."
+
+## Hint 3
+
+The required output ordering here happens to be `customer_id`, which is also
+the `DISTINCT ON` expression — so a single `ORDER BY customer_id, created_at,
+id` satisfies both the syntax rule and the presentation. That is a
+coincidence worth noticing: when the required output order is *different*
+from the `DISTINCT ON` key, you need a wrapper query to re-sort, and the
+decision of where to put it is yours.
+@@@FILE ex2/importantHints.md
+## Hint 1
+
+Provoke the error on purpose, once, so you recognise it instantly:
+
+```sql
+SELECT DISTINCT ON (customer_id) customer_id, id, created_at
+FROM orders ORDER BY created_at;
+```
+
+`ERROR: SELECT DISTINCT ON expressions must match initial ORDER BY
+expressions`. The rule is not arbitrary — the implementation sorts by the
+`ORDER BY` and takes the first row of each key cluster, which only works if
+the clusters are contiguous.
+
+## Hint 2
+
+Now the failure that does *not* error:
+
+```sql
+SELECT DISTINCT ON (customer_id) customer_id, id, created_at
+FROM orders ORDER BY customer_id;
+```
+
+Legal. Returns one row per customer. Which row? Whichever the sort emitted
+first — undefined, stable enough to pass every test you write, and liable to
+change when an index appears. A `DISTINCT ON` whose `ORDER BY` contains
+nothing beyond the key is a bug on sight.
+
+## Hint 3
+
+Compare the two shapes on this dataset once you have both working. The
+`row_number` version from exercise 1 sorts, numbers every row, then discards
+the ones it numbered. `DISTINCT ON` sorts and takes the first of each
+cluster — no numbering, no discarding. Same answer, less work; the plan
+shows `Unique` over `Sort` instead of a `WindowAgg`.
+@@@FILE ex2/solution.sql
+-- v3a06_dedup_latest_row / ex2 — the first order per customer, via DISTINCT ON.
+SELECT DISTINCT ON (customer_id)
+       customer_id,
+       id,
+       created_at,
+       total
+FROM orders
+WHERE customer_id BETWEEN 1 AND 20
+ORDER BY customer_id, created_at, id;
+@@@FILE ex2/expected.sql
+WITH ranked AS (
+    SELECT customer_id,
+           id,
+           created_at,
+           total,
+           row_number() OVER (PARTITION BY customer_id
+                              ORDER BY created_at, id) AS rn
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 20
+)
+SELECT customer_id,
+       id,
+       created_at,
+       total
+FROM ranked
+WHERE rn = 1
+ORDER BY customer_id;
+@@@FILE ex3/prompt.md
+## Exercise 3 — no later row exists
+
+Edit `ex3/solution.sql`.
+
+Works against the same slice of `orders`: `customer_id BETWEEN 1 AND 20`.
+
+The third spelling of "latest per customer", and the one that uses no window
+function at all: keep the rows for which **no later row exists** for the
+same customer.
+
+```sql
+WHERE NOT EXISTS (
+    SELECT 1 FROM orders later
+    WHERE later.customer_id = o.customer_id
+      AND (later.created_at, later.id) > (o.created_at, o.id)
+)
+```
+
+`(a, b) > (c, d)` is a row comparison, and it is lexicographic: true when
+`a > c`, or when `a = c` and `b > d`. That makes it exactly equivalent to
+`ORDER BY a DESC, b DESC`, which is why using the pair here gives you one
+row per customer.
+
+Compare against the tempting shorter version, `later.created_at >
+o.created_at`. That keeps **every** row tied for the latest timestamp — so a
+customer with two simultaneous orders contributes two rows. Neither
+behaviour is wrong; they answer "the latest order" and "the orders that are
+latest" respectively. This exercise wants exactly one row per customer, so
+use the pair.
+
+Illustration:
+
+```
+ customer_id | id     | created_at             | total
+-------------+--------+------------------------+---------
+           1 | 411902 | 2023-09-14 11:02:00+00 | 1204.50
+           2 | 388771 | 2023-10-02 06:31:00+00 |  318.90
+```
+
+Columns, in this order: `customer_id`, `id`, `created_at`, `total`.
+
+**Ordered by `customer_id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex3
+```
+@@@FILE ex3/hints.md
+## Hint 1
+
+Turn the requirement inside out. Instead of "find the biggest", say "keep
+the ones nothing beats". That phrasing is an anti-join, and SQL spells it
+`NOT EXISTS`.
+
+## Hint 2
+
+The shape, on a different table:
+
+```sql
+SELECT s.* FROM staff s
+WHERE NOT EXISTS (SELECT 1 FROM staff t
+                   WHERE t.department = s.department
+                     AND t.salary > s.salary);
+```
+
+"Everyone whose department contains nobody better paid" — the top earner of
+each department, with ties kept.
+
+## Hint 3
+
+The subquery must be correlated on `customer_id` and compare on the pair
+`(created_at, id)`. Both filters — the outer `customer_id BETWEEN 1 AND 20`
+and the correlation — are needed, and the decision left to you is whether
+the inner query also needs the range filter. It does not affect
+correctness here; think about whether it affects the plan.
+@@@FILE ex3/importantHints.md
+## Hint 1
+
+Write both versions and diff their row counts. With `(later.created_at,
+later.id) > (o.created_at, o.id)` you get one row per customer. With
+`later.created_at > o.created_at` you get one row per customer *plus* one
+extra for every simultaneous tie. On this slice the two probably agree,
+because timestamps to the second rarely collide across ten orders — and that
+is exactly why the difference is dangerous rather than obvious.
+
+## Hint 2
+
+Row comparison is worth a moment of its own. `(a, b) > (c, d)` is **not**
+`a > c AND b > d`. It is lexicographic: compare `a` and `c` first, and only
+look at `b` and `d` if they are equal. The conjunctive version would be a
+completely different and much stricter predicate, and writing it by mistake
+gives you far too many rows.
+
+## Hint 3
+
+Think about cost. This shape reads the table twice and joins it to itself;
+the `row_number` and `DISTINCT ON` versions read it once. On twenty
+customers that is invisible. On the full half-million-row table it is the
+difference between a hash anti-join over 500,000 rows and a single sort. Use
+`NOT EXISTS` when its tie semantics are what you want, not as a default.
+@@@FILE ex3/solution.sql
+-- v3a06_dedup_latest_row / ex3 — latest per customer as an anti-join.
+SELECT o.customer_id,
+       o.id,
+       o.created_at,
+       o.total
+FROM orders o
+WHERE o.customer_id BETWEEN 1 AND 20
+  AND NOT EXISTS (
+      SELECT 1
+      FROM orders later
+      WHERE later.customer_id = o.customer_id
+        AND (later.created_at, later.id) > (o.created_at, o.id)
+  )
+ORDER BY o.customer_id;
+@@@FILE ex3/expected.sql
+SELECT o.customer_id,
+       o.id,
+       o.created_at,
+       o.total
+FROM orders o
+LEFT JOIN orders later
+       ON later.customer_id = o.customer_id
+      AND (later.created_at, later.id) > (o.created_at, o.id)
+WHERE o.customer_id BETWEEN 1 AND 20
+  AND later.id IS NULL
+ORDER BY o.customer_id;
+@@@FILE ex4/prompt.md
+## Exercise 4 — where the naive join breaks
+
+Edit `ex4/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `customer_id <= 2000`.
+
+The "latest row per key" query that everybody writes first computes
+`max(sort_key)` per key and joins it back. That returns one row per key only
+when the maximum is unique. This exercise produces the evidence: the
+customers for whom it would return more than one row, at **day** grain.
+
+So: for each customer, find their most recent ordering *day*
+(`created_at::date`), and keep the customers who placed two or more orders
+on that day.
+
+Illustration:
+
+```
+ customer_id | last_day   | orders_on_last_day
+-------------+------------+--------------------
+          47 | 2023-08-19 |                  2
+         311 | 2023-02-02 |                  3
+        1904 | 2023-10-30 |                  2
+```
+
+Every row here is a customer for whom this query
+
+```sql
+SELECT o.* FROM orders o
+JOIN (SELECT customer_id, max(created_at::date) AS d
+      FROM orders GROUP BY customer_id) x
+  ON x.customer_id = o.customer_id AND o.created_at::date = x.d
+```
+
+would emit two or three rows instead of one — inflating any count taken
+over the result.
+
+Two stages: reduce to one row per (customer, day) with a count, then keep
+only each customer's latest day, then filter on the count. Note that the
+filter on the count cannot go in the same `WHERE` as a window function.
+
+Columns, in this order: `customer_id`, `last_day` (a `date`),
+`orders_on_last_day`.
+
+**Ordered by `customer_id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex4
+```
+@@@FILE ex4/hints.md
+## Hint 1
+
+Two different questions stacked: "how many orders on each day" and "which
+day is the last one". Answer them in that order — the second operates on the
+result of the first.
+
+## Hint 2
+
+The first stage:
+
+```sql
+SELECT customer_id, created_at::date AS day, count(*) AS n
+FROM orders
+WHERE customer_id <= 2000
+GROUP BY customer_id, created_at::date
+```
+
+Now every row is a (customer, day) pair with a count, which is a much
+smaller thing to rank.
+
+## Hint 3
+
+Rank those rows per customer by `day DESC` and keep number 1 — no tie-break
+is needed, because `(customer_id, day)` is already unique after the
+`GROUP BY`. Then filter `n >= 2`. The decision left to you is whether that
+last filter goes in the same query level as the `rn = 1` test; both are
+conditions on non-window columns at that point, so it can.
+@@@FILE ex4/importantHints.md
+## Hint 1
+
+Be clear about what you are counting. `orders_on_last_day` is the number of
+orders on the customer's most recent day — not the number of days, not the
+customer's total orders. If your numbers look like ten, you have counted the
+customer's whole history; if they look like one, your filter is missing.
+
+## Hint 2
+
+The `::date` cast is the whole point of the exercise. At timestamp grain,
+two orders sharing a maximum are rare enough to be invisible in testing; at
+date grain they are common. Sort keys get coarser all the time in real
+systems — a date instead of a timestamp, a version number, a batch id, a
+"day" column added for reporting — and every step of coarsening makes the
+join-back bug more likely. The fragility is in the key, not in the customer.
+
+## Hint 3
+
+Once it runs, look at the row count against 2000. That fraction is the
+probability that a `max()`-and-join query at this grain silently returns an
+extra row for a given customer. Multiply it by the size of a real customer
+table and you have the number of duplicated rows that a nightly report has
+been carrying.
+@@@FILE ex4/solution.sql
+-- v3a06_dedup_latest_row / ex4 — customers whose most recent day holds several orders.
+WITH per_day AS (
+    SELECT customer_id,
+           created_at::date AS day,
+           count(*)         AS orders_that_day
+    FROM orders
+    WHERE customer_id <= 2000
+    GROUP BY customer_id, created_at::date
+),
+ranked AS (
+    SELECT customer_id,
+           day,
+           orders_that_day,
+           row_number() OVER (PARTITION BY customer_id ORDER BY day DESC) AS rn
+    FROM per_day
+)
+SELECT customer_id,
+       day              AS last_day,
+       orders_that_day  AS orders_on_last_day
+FROM ranked
+WHERE rn = 1
+  AND orders_that_day >= 2
+ORDER BY customer_id;
+@@@FILE ex4/expected.sql
+WITH per_day AS (
+    SELECT customer_id,
+           created_at::date AS day,
+           count(*)         AS orders_that_day
+    FROM orders
+    WHERE customer_id <= 2000
+    GROUP BY customer_id, created_at::date
+),
+last_day AS (
+    SELECT DISTINCT ON (customer_id)
+           customer_id,
+           day,
+           orders_that_day
+    FROM per_day
+    ORDER BY customer_id, day DESC
+)
+SELECT customer_id,
+       day             AS last_day,
+       orders_that_day AS orders_on_last_day
+FROM last_day
+WHERE orders_that_day >= 2
+ORDER BY customer_id;

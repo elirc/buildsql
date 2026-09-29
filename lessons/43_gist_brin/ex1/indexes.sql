@@ -1,1 +1,0 @@
--- 43_gist_brin/ex1: your BRIN index here

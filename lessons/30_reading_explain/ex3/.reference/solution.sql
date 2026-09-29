@@ -1,1 +1,0 @@
-SELECT 'top-N heapsort';

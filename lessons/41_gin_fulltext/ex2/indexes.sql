@@ -1,1 +1,0 @@
--- 41_gin_fulltext/ex2: your GIN index here

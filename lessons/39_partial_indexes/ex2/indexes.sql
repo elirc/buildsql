@@ -1,1 +1,0 @@
--- 39_partial_indexes/ex2: your partial CREATE INDEX here

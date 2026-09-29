@@ -1,0 +1,547 @@
+@@@FILE ex1/prompt.md
+## Exercise 1 — the missing ids
+
+Edit `ex1/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`. Restrict to `customer_id <= 500`.
+About one customer in ten has never ordered, so the set of customer ids that
+*do* appear in `orders` has holes in it.
+
+Support wants those holes reported as ranges, not as one row per missing
+customer. Take the distinct customer ids present in `orders`, sort them, and
+report every pair of adjacent ids that are more than one apart.
+
+Illustration on a present-id list of 3, 4, 5, 9, 10, 14:
+
+```
+ gap_start | gap_end | missing
+-----------+---------+---------
+         6 |       8 |       3
+        11 |      13 |       3
+```
+
+Read the arithmetic carefully. Between 5 and 9 the missing values are 6, 7
+and 8 — the range is `previous + 1` to `next - 1`, and the count is
+`next - previous - 1`, not `next - previous`.
+
+This finds holes *between* present ids only. If customer 1 never ordered and
+the smallest present id is 4, that leading hole has no adjacent pair and
+will not appear. That is a real limitation of the technique and the prompt
+is not asking you to work around it.
+
+Columns, in this order: `gap_start` (the first missing id in the run),
+`gap_end` (the last missing id in the run), `missing` (how many ids the run
+covers).
+
+**Ordered by `gap_start` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex1
+```
+@@@FILE ex1/hints.md
+## Hint 1
+
+A gap is not a property of a row — it is a property of two adjacent rows.
+So the first job is to put the next id onto each row, and the second is to
+keep only the rows where the distance is bigger than one.
+
+## Hint 2
+
+```sql
+SELECT cid, lead(cid) OVER (ORDER BY cid) AS next_cid
+FROM present;
+```
+
+Then the gap is described entirely by `cid` and `next_cid`; no further
+window functions are needed.
+
+## Hint 3
+
+Two query levels: one computes `next_cid`, the other filters and does the
+arithmetic. The filter has to be outside because it is a condition on a
+window result. The decision left to you is how to build the `present` set —
+`SELECT DISTINCT customer_id` over the filtered orders is the obvious way,
+and grouping would do the same job.
+@@@FILE ex1/importantHints.md
+## Hint 1
+
+Do the off-by-one on paper before touching SQL. Present ids 5 and 9. What is
+the first missing id? What is the last? How many are there? Write those
+three answers down as formulas in terms of 5 and 9, and the select list is
+finished.
+
+## Hint 2
+
+The final row deserves a thought. The largest present id has no successor,
+so `lead` returns NULL, and `NULL - cid > 1` is unknown — `WHERE` discards
+it. That is the behaviour you want here, and it happens without a special
+case. It also means the query cannot tell you about missing ids *after* the
+last present one, which is the same blind spot as the missing prefix.
+
+## Hint 3
+
+If you want to see how the bounded version would look, try this and compare
+the row counts:
+
+```sql
+SELECT g FROM generate_series(1, 500) AS g
+WHERE NOT EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = g);
+```
+
+That finds every hole including the ends, one row per missing id rather than
+one row per range. Turning those rows back into ranges is an islands
+problem — which is exercise 2.
+@@@FILE ex1/solution.sql
+-- v3a05_gaps_and_islands / ex1 — missing customer ids, reported as ranges.
+WITH present AS (
+    SELECT DISTINCT customer_id AS cid
+    FROM orders
+    WHERE customer_id <= 500
+),
+paired AS (
+    SELECT cid,
+           lead(cid) OVER (ORDER BY cid) AS next_cid
+    FROM present
+)
+SELECT cid + 1            AS gap_start,
+       next_cid - 1       AS gap_end,
+       next_cid - cid - 1 AS missing
+FROM paired
+WHERE next_cid - cid > 1
+ORDER BY gap_start;
+@@@FILE ex1/expected.sql
+WITH present AS (
+    SELECT DISTINCT customer_id AS cid
+    FROM orders
+    WHERE customer_id <= 500
+),
+paired AS (
+    SELECT cid,
+           lag(cid) OVER (ORDER BY cid) AS prev_cid
+    FROM present
+)
+SELECT prev_cid + 1       AS gap_start,
+       cid - 1            AS gap_end,
+       cid - prev_cid - 1 AS missing
+FROM paired
+WHERE cid - prev_cid > 1
+ORDER BY gap_start;
+@@@FILE ex2/prompt.md
+## Exercise 2 — the islands trick, on integers
+
+Edit `ex2/solution.sql`.
+
+Works against the same input as exercise 1: the distinct `customer_id`
+values in `orders` with `customer_id <= 500`.
+
+Same data, opposite question. Instead of the holes, report the unbroken
+runs: every maximal stretch of consecutive customer ids that all appear in
+`orders`.
+
+Illustration on a present-id list of 3, 4, 5, 9, 10, 14:
+
+```
+ run_start | run_end | run_length
+-----------+---------+-----------
+         3 |       5 |          3
+         9 |      10 |          2
+        14 |      14 |          1
+```
+
+A run of one is still a run — an isolated id produces a row where
+`run_start` and `run_end` are equal and `run_length` is 1.
+
+The mechanism: number the sorted ids with `row_number()`, and subtract the
+row number from the id. Inside a run both increase by exactly one per row,
+so the difference stays constant; when the id jumps, the difference jumps
+too. That difference is a group key — it has no meaning of its own and must
+not appear in your output.
+
+```
+ cid | row_number | cid - row_number
+-----+------------+-----------------
+   3 |          1 |                2
+   4 |          2 |                2
+   5 |          3 |                2
+   9 |          4 |                5
+  10 |          5 |                5
+  14 |          6 |                8
+```
+
+Columns, in this order: `run_start` (the first id of the run), `run_end`
+(the last), `run_length` (how many ids it contains).
+
+**Ordered by `run_start` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex2
+```
+@@@FILE ex2/hints.md
+## Hint 1
+
+`GROUP BY` can only group by something it can see. There is no column in the
+input that says which run a row belongs to, so the first job is to
+manufacture one.
+
+## Hint 2
+
+```sql
+SELECT cid, cid - row_number() OVER (ORDER BY cid) AS grp
+FROM present;
+```
+
+Run that on its own and read the second column. Rows in the same run share
+it; rows in different runs do not.
+
+## Hint 3
+
+Then `GROUP BY grp` and aggregate: `min`, `max`, `count(*)`. The key itself
+never leaves the subquery — it is scaffolding. The decision left to you is
+the output ordering: sorting by `grp` would happen to work here, but sorting
+by `min(cid)` says what you mean and keeps working when the key is negative
+or non-monotonic.
+@@@FILE ex2/importantHints.md
+## Hint 1
+
+Convince yourself the trick is arithmetic rather than magic. Take any two
+adjacent rows inside a run: the id increased by 1 and the row number
+increased by 1, so the difference is unchanged. Take two rows across a gap
+of size 4: the id increased by 4 and the row number by 1, so the difference
+increased by 3. Constant inside, different across. That is the entire
+argument.
+
+## Hint 2
+
+The failure to watch for: using this trick when the step is not 1. If the
+input were even-numbered ids only — 2, 4, 6, 8 — the difference would
+increase by one on every row and every "run" would come out as a single row.
+The trick encodes an assumption about the step size, and the assumption is
+invisible in the code.
+
+## Hint 3
+
+Notice the relationship with exercise 1. The runs here are exactly what sits
+between the gaps there: `run_end + 1` of one row is `gap_start` of the
+matching gap. Gaps and islands are duals, and in practice you pick whichever
+one the data hands you more directly and derive the other if you need it.
+@@@FILE ex2/solution.sql
+-- v3a05_gaps_and_islands / ex2 — unbroken runs of customer ids.
+WITH present AS (
+    SELECT DISTINCT customer_id AS cid
+    FROM orders
+    WHERE customer_id <= 500
+),
+keyed AS (
+    SELECT cid,
+           cid - row_number() OVER (ORDER BY cid) AS grp
+    FROM present
+)
+SELECT min(cid) AS run_start,
+       max(cid) AS run_end,
+       count(*) AS run_length
+FROM keyed
+GROUP BY grp
+ORDER BY run_start;
+@@@FILE ex2/expected.sql
+WITH present AS (
+    SELECT DISTINCT customer_id AS cid
+    FROM orders
+    WHERE customer_id <= 500
+),
+starts AS (
+    SELECT s.cid
+    FROM present s
+    WHERE NOT EXISTS (SELECT 1 FROM present p WHERE p.cid = s.cid - 1)
+),
+bounded AS (
+    SELECT s.cid AS run_start,
+           (SELECT min(e.cid)
+              FROM present e
+             WHERE e.cid >= s.cid
+               AND NOT EXISTS (SELECT 1 FROM present q WHERE q.cid = e.cid + 1)) AS run_end
+    FROM starts s
+)
+SELECT run_start,
+       run_end,
+       run_end - run_start + 1 AS run_length
+FROM bounded
+ORDER BY run_start;
+@@@FILE ex3/prompt.md
+## Exercise 3 — runs of days
+
+Edit `ex3/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)` — 1,000,000 rows over 10,000 products. Restrict to
+`product_id = 1`, which has roughly a hundred reviews spread across a year,
+so most days have none and a few have two or three.
+
+Product quality wants the *streaks*: every maximal stretch of consecutive
+calendar days on which product 1 received at least one review.
+
+Reduce to distinct days first — a day with three reviews is still one day —
+then apply the islands trick with dates.
+
+Illustration on the day list 2023-03-02, 03-03, 03-04, 03-09, 03-10:
+
+```
+ start_day  | end_day    | days
+------------+------------+------
+ 2023-03-02 | 2023-03-04 |    3
+ 2023-03-09 | 2023-03-10 |    2
+```
+
+The arithmetic is the same as exercise 2 with one wrinkle: `row_number()`
+returns a `bigint`, and PostgreSQL has no `date - bigint` operator. Cast it:
+`day - (row_number() OVER (ORDER BY day))::int`. Subtracting an integer from
+a date gives a date, and that date is the group key.
+
+Columns, in this order: `start_day` (a `date`), `end_day` (a `date`), `days`
+(how many days the streak covers).
+
+**Ordered by `start_day` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex3
+```
+@@@FILE ex3/hints.md
+## Hint 1
+
+Two preparation steps before the trick applies: one row per day (not per
+review), and the days sorted. Then it is exactly exercise 2 with a different
+type.
+
+## Hint 2
+
+```sql
+SELECT DISTINCT date_trunc('day', created_at)::date AS day
+FROM reviews
+WHERE product_id = 1;
+```
+
+That is the series. Everything after it operates on dates rather than
+reviews.
+
+## Hint 3
+
+`day - (row_number() OVER (ORDER BY day))::int` is the key. Group by it and
+aggregate with `min`, `max` and `count(*)`. The decision left to you: should
+`days` be `count(*)` or `end_day - start_day + 1`? On a correct answer they
+are identical — and if they ever disagree, your runs are not actually
+consecutive, which makes the comparison a useful self-check.
+@@@FILE ex3/importantHints.md
+## Hint 1
+
+Meet the error on purpose. Write the key without the cast:
+
+```sql
+day - row_number() OVER (ORDER BY day)
+```
+
+PostgreSQL: `operator does not exist: date - bigint`. There is a `date -
+integer` operator (giving a date) and a `date - date` operator (giving an
+integer), but nothing for `bigint`. One cast fixes it, and knowing which
+cast is the difference between five seconds and fifteen minutes.
+
+## Hint 2
+
+The other thing to get right before the trick is the `DISTINCT`. Product 1
+has about a hundred reviews on rather fewer distinct days. Skip the
+`DISTINCT` and two reviews on the same day become two rows with the same
+`day` and consecutive row numbers — so their difference changes, and a
+single day splits into two "runs". Reduce to the grain of the question
+first.
+
+## Hint 3
+
+Sanity-check the output against the input: `sum(days)` across all your runs
+must equal the number of distinct review days for product 1. If it is
+larger, something is being double-counted; if smaller, some days fell out of
+the series entirely.
+@@@FILE ex3/solution.sql
+-- v3a05_gaps_and_islands / ex3 — consecutive-day review streaks for product 1.
+WITH days AS (
+    SELECT DISTINCT date_trunc('day', created_at)::date AS day
+    FROM reviews
+    WHERE product_id = 1
+),
+keyed AS (
+    SELECT day,
+           day - (row_number() OVER (ORDER BY day))::int AS grp
+    FROM days
+)
+SELECT min(day) AS start_day,
+       max(day) AS end_day,
+       count(*) AS days
+FROM keyed
+GROUP BY grp
+ORDER BY start_day;
+@@@FILE ex3/expected.sql
+WITH days AS (
+    SELECT DISTINCT date_trunc('day', created_at)::date AS day
+    FROM reviews
+    WHERE product_id = 1
+),
+flagged AS (
+    SELECT day,
+           CASE WHEN lag(day) OVER (ORDER BY day) IS NULL
+                  OR day - lag(day) OVER (ORDER BY day) > 1
+                THEN 1 ELSE 0 END AS new_run
+    FROM days
+),
+numbered AS (
+    SELECT day,
+           sum(new_run) OVER (ORDER BY day) AS run_no
+    FROM flagged
+)
+SELECT min(day) AS start_day,
+       max(day) AS end_day,
+       count(*) AS days
+FROM numbered
+GROUP BY run_no
+ORDER BY start_day;
+@@@FILE ex4/prompt.md
+## Exercise 4 — one island series per group
+
+Edit `ex4/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)`, restricted to `product_id <= 3` — three products,
+each with its own sparse series of review days.
+
+The same streak report as exercise 3, computed independently for each
+product in a single query. Product 2's streaks must not merge with product
+1's, and a day on which two different products were both reviewed belongs to
+both series.
+
+Illustration:
+
+```
+ product_id | start_day  | end_day    | days
+------------+------------+------------+------
+          1 | 2023-03-02 | 2023-03-04 |    3
+          1 | 2023-03-09 | 2023-03-10 |    2
+          2 | 2023-03-03 | 2023-03-03 |    1
+          2 | 2023-05-19 | 2023-05-21 |    3
+          3 | 2023-01-08 | 2023-01-09 |    2
+```
+
+Two changes from exercise 3, and the second is the one people miss. The
+`row_number()` must be partitioned by `product_id`, so each product's
+counter starts at 1. And the `GROUP BY` must include `product_id` alongside
+the key — two products can produce the same difference by pure coincidence,
+and grouping by the key alone would merge their runs into one.
+
+Reduce to distinct (`product_id`, `day`) pairs first.
+
+Columns, in this order: `product_id`, `start_day` (a `date`), `end_day` (a
+`date`), `days`.
+
+**Ordered by `product_id` ascending, then `start_day` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex4
+```
+@@@FILE ex4/hints.md
+## Hint 1
+
+Three independent series in one result set. Everything that was "the whole
+series" in exercise 3 becomes "this product's series", and there is one
+clause that says so.
+
+## Hint 2
+
+```sql
+day - (row_number() OVER (PARTITION BY product_id ORDER BY day))::int AS grp
+```
+
+The partition restarts the counter at every product, which is exactly what
+makes the differences comparable within a product and meaningless across
+products.
+
+## Hint 3
+
+Because the differences are meaningless across products, the `GROUP BY` must
+carry the product id too. Whether you also want `product_id` in the select
+list of the keyed stage is not optional — you cannot group by a column you
+did not project. The decision left to you: `DISTINCT product_id, day` or
+`GROUP BY product_id, day`? Both reduce to the same series.
+@@@FILE ex4/importantHints.md
+## Hint 1
+
+Construct the bug deliberately so you recognise it later. Group by `grp`
+alone and look for a run whose `days` count is larger than the number of
+days between its `start_day` and `end_day`. That is two products' runs
+fused: the `min` and `max` come from different series, and the count is the
+sum of both. It is not always visible — it only shows when two products
+happen to collide on the key — which is what makes it a genuinely nasty
+production bug.
+
+## Hint 2
+
+A cheap invariant that catches it every time: for every output row,
+`end_day - start_day + 1` must equal `days`. Add that as a fourth column
+while you are developing and delete it before you submit. A run where those
+differ is not a run.
+
+## Hint 3
+
+Think about what "consecutive" means across products for a moment. Product 1
+reviewed on the 2nd and product 2 reviewed on the 3rd is not a two-day
+streak for anybody — the series are independent, and the partition is what
+encodes that independence. If the question had been "days on which *any* of
+the three products was reviewed", you would drop the partition and the
+`DISTINCT` would collapse the products away. Same trick, different grain,
+different answer.
+@@@FILE ex4/solution.sql
+-- v3a05_gaps_and_islands / ex4 — per-product review streaks.
+WITH days AS (
+    SELECT DISTINCT product_id,
+                    date_trunc('day', created_at)::date AS day
+    FROM reviews
+    WHERE product_id <= 3
+),
+keyed AS (
+    SELECT product_id,
+           day,
+           day - (row_number() OVER (PARTITION BY product_id
+                                     ORDER BY day))::int AS grp
+    FROM days
+)
+SELECT product_id,
+       min(day) AS start_day,
+       max(day) AS end_day,
+       count(*) AS days
+FROM keyed
+GROUP BY product_id, grp
+ORDER BY product_id, start_day;
+@@@FILE ex4/expected.sql
+WITH days AS (
+    SELECT DISTINCT product_id,
+                    date_trunc('day', created_at)::date AS day
+    FROM reviews
+    WHERE product_id <= 3
+),
+flagged AS (
+    SELECT product_id,
+           day,
+           CASE WHEN lag(day) OVER w IS NULL
+                  OR day - lag(day) OVER w > 1
+                THEN 1 ELSE 0 END AS new_run
+    FROM days
+    WINDOW w AS (PARTITION BY product_id ORDER BY day)
+),
+numbered AS (
+    SELECT product_id,
+           day,
+           sum(new_run) OVER (PARTITION BY product_id ORDER BY day) AS run_no
+    FROM flagged
+)
+SELECT product_id,
+       min(day) AS start_day,
+       max(day) AS end_day,
+       count(*) AS days
+FROM numbered
+GROUP BY product_id, run_no
+ORDER BY product_id, start_day;

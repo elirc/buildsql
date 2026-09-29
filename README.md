@@ -1,190 +1,74 @@
-# The Dojo
+﻿# IPSKILL: six-track curriculum and applied CRUD practice
 
-**Six self-directed, gate-graded courses sharing one harness: SQL,
-TypeScript, Node.js, React, C#, and ASP.NET Core — plus a full-stack
-interview-prep part at the end of every track.**
+**This is IPSKILL, a React app.** It displays a SQL/TS/Node/React/C#/.NET lesson archive; it is not itself a SQL course, despite the folder name `buildsql`.
 
-**310 lessons. 2,155 graded exercises.** Every exercise is real code you write
-yourself — real SQL against a real PostgreSQL 16 database, real TypeScript
-graded down to the *types*, real React graded through the accessible DOM,
-real C# and ASP.NET Core graded by xUnit through an in-process test server.
-An automated gate grades your work and — when you fail — teaches: it shows
-the evidence and points you at what to reread. Nothing autocompletes.
-Nothing is multiple-choice.
+IPSKILL is a local React and TypeScript learning workspace. It preserves 310 lessons and 2,155 missions across SQL, TypeScript, Node, React, C# and .NET, with explicit progress saves, recall scheduling, an archive and a CRUD practice-project tracker.
 
-| track | alias | lessons | graded exercises | graded by |
-|---|---|---:|---:|---|
-| `sql` | (default) | 115 | 779 | pytest + PostgreSQL 16 in Docker |
-| `typescript` | `ts` | 39 | 275 | vitest, incl. type-level gates (`expectTypeOf`) |
-| `node` | | 39 | 274 | vitest + supertest |
-| `react` | | 39 | 275 | vitest + Testing Library (jsdom) |
-| `csharp` | `cs` | 41 | 289 | xUnit (`dotnet test`) |
-| `dotnet` | `net` | 37 | 263 | xUnit + WebApplicationFactory, EF Core on SQLite |
+Start the detailed junior-to-mid-level course at [astraupskill/README.md](astraupskill/README.md). It includes a source tour, a worked change, examples, failure investigations, five applied tickets and review guidance. Check [the dated verification record](astraupskill/VERIFICATION.md) for actual completed checks and limits.
 
-Every command takes a track as its first word; with no track you get SQL, so
-every command you already know still means what it always meant.
+## Local setup
 
-```bash
-uv run dojo next typescript          # what to work on there
-uv run dojo test cs 03_classes ex2   # grade one exercise (aliases work)
-uv run dojo status                   # every track at once
+Use Node 22.16 or a compatible Node 22 release below 23. Dependency versions are pinned to the versions recorded in the existing lockfile. From this folder:
+
+```powershell
+npm ci
+npm run dev
 ```
 
-## Setup (once)
+Open `http://127.0.0.1:5187`. The port is strict: an occupied port produces an error rather than silently selecting another origin. The app stores data in this browser profile and origin. An old workspace on port 5173 remains associated with that origin; export it there and use reviewed import at the new origin. No cloud account or backend service is involved.
 
-The harness is Python: `uv venv && uv pip install -e ".[dev]"`, then
-`cp .env.example .env`. After that, each track family has one prerequisite:
+To run the production build:
 
-- **SQL** — Docker Desktop. `uv run dojo up` starts PostgreSQL 16,
-  `uv run dojo seed` builds the template database (~5 minutes, one time).
-- **TypeScript / Node / React** — Node 20+. `uv run dojo setup typescript`
-  runs one `npm install` in `tracks/` that covers all three tracks.
-- **C# / ASP.NET Core** — .NET SDK 10. `uv run dojo setup csharp` (or
-  `dotnet`) builds the solution.
+```powershell
+npm run build
+npm run preview
+```
 
-`uv run dojo doctor` diagnoses all of it. Start anywhere: `uv run dojo next
-<track>` points at that track's lesson 00, which is a guided tour of the
-whole loop.
+Create an empty local workspace explicitly. Applying a practice form updates the workspace draft. Click **Save workspace** to persist it, and wait for the saved revision. Mission notes, profile changes and completion records also remain drafts until that save. Export regular copies because browser storage can be cleared or evicted.
 
-## The gameplay loop
+## Existing progress and recovery
 
-1. `uv run dojo next <track>` — tells you what to work on and which file to edit.
-2. Read the lesson's `README.md`, top to bottom.
-3. Edit the exercise's solution file (`solution.sql`, `solution.ts(x)`, or
-   the named `.cs` file — `dojo next` always prints the exact path).
-4. `uv run dojo test <track> <lesson> <exN>` — the gate grades you.
-5. Red? Read the failure — it's written to teach. Stuck?
-   `uv run dojo hint <track> <lesson> <exN>` reveals one hint tier at a time.
-6. **Either way, take the reading.** After grading, the dojo offers the
-   theory behind that exact problem — press Enter to open it inline, `s` to
-   skip, `uv run dojo read <track> <lesson> [ex]` any time,
-   `--no-read`/`DOJO_NO_READING=1` to silence the prompt.
-7. Green? `dojo next` again.
+The earlier app stored progress under `ipskill.save.v1` in localStorage. On the same origin, the revised app detects that value and offers reviewed migration. It validates known mission IDs, rewards, dates and related histories, preserves the original raw text and creates an IndexedDB recovery snapshot. It never silently resets malformed data or deletes the legacy value.
 
-Isolation is absolute in every track: SQL runs against a fresh throwaway
-clone of the seeded template; JS and .NET gates run against your working
-tree with per-test sandboxes (temp dirs, in-memory SQLite, in-process HTTP).
-You cannot break anything, ever.
+If migration rejects data, export the original and review a copy. Do not clear storage as a first troubleshooting step. The new workspace uses `ipskill-workspace-v2` with `workspace` and `backups` object stores. An invalid active aggregate remains available through **Export accepted raw data**. Recovery of corrupt active data requires reviewing the exported copy in a separate profile; the normal UI will not overwrite an unreadable aggregate.
 
-## Commands
+In **Save data**, preview an import before applying it. Resolve dirty changes first. Replacement stores the previous accepted aggregate as a snapshot and creates a new workspace identity, preventing an old tab from overwriting the replacement. Ten snapshots are retained; a full snapshot store refuses another replacement. Download snapshots for independent recovery. There is no automatic history pruning or merge engine.
 
-| command | what it does |
-|---|---|
-| `dojo tracks` | list all six tracks with per-track completion |
-| `dojo next [track]` | first incomplete exercise (no track: one line per track) |
-| `dojo test <track> <lesson> [ex]` | grade a lesson or one exercise |
-| `dojo hint <track> <lesson> <ex>` | reveal the next hint tier |
-| `dojo read <track> <lesson> [ex]` | the theory behind one exercise, or the lesson's notes |
-| `dojo status [track]` | progress dashboard (no track: everything) |
-| `dojo review` / `dojo review run` | list / run due spaced reviews — across all tracks |
-| `dojo setup <track>` | one-time toolchain prep (npm install / dotnet build) |
-| `dojo doctor` | diagnose your setup, all toolchains |
-| `dojo verify [track] [lesson]` | author/CI: prove every exercise is solvable |
-| `dojo up` / `down` / `seed` / `lab` / `plan` / `reset-baseline` | SQL track: database lifecycle, sandbox psql, EXPLAIN, speed baselines |
+When two tabs conflict, export the losing draft before loading current data. Then manually reapply the intended change to current records. The transaction protects a complete workspace, so independent edits can still conflict. A notification is advisory; the identity and revision comparison inside the write transaction is the actual protection.
 
-(Prefix everything with `uv run`, or activate the venv.)
+## Learning and practice
 
-## The curricula
+The mission workspace records written practice and self-review. **Compare with reference** does not execute code. Archived CLI commands and source file paths belong to the original course workspaces, which are not all included in this repository. Run those exercises only in a matching source workspace, then record the command, observed result and reasoning here.
 
-**SQL (55)** — Part 0 orientation; Parts 1–2 fundamentals and intermediate
-querying (SELECT through windows, CTEs, JSONB); Part 3 modifying data and
-transactions; Part 4 schema design; Part 5 performance and indexing (gates
-check rows, plan shape, **and speed** vs your machine's own baseline);
-Part 6 capstone; Parts 7–8 advanced patterns (LATERAL, DISTINCT ON,
-GROUPING SETS, query rewrites, keyset pagination); Part 9 interview prep.
+The CRUD practice view supports create, list, search, status filtering, pagination, edit and delete. A project needs a title and observable goal. Review and completion require written evidence. The length thresholds discourage empty submissions; they do not certify correctness. New completions follow catalog prerequisites, configured XP is awarded once, and failed recall schedules another attempt. Streak days use UTC; review intervals use elapsed 24-hour days.
 
-**TypeScript (15)** — inference and annotations, functions, objects and
-interfaces, unions and narrowing, literals, generics (two lessons), utility
-types, mapped and conditional types, guards and assertions, async and
-declaration files — every lesson gated on both runtime behavior *and* the
-types themselves — then interview prep.
+## Checks
 
-**Node (15)** — modules, the event loop (graded output-prediction drills),
-async patterns, events and errors, fs and path, buffers and streams (two
-lessons), HTTP from scratch, Express 5, middleware and validation, and a
-REST capstone graded end-to-end — then interview prep.
+```powershell
+npm test
+npm run validate
+npm run build
+python -m venv .venv
+.venv/Scripts/python -m pip install -r verification/requirements-browser.txt
+.venv/Scripts/python -m playwright install chromium
+.venv/Scripts/python verification/verify_browser.py
+```
 
-**React (15)** — components and JSX, props and composition, state and
-events, lists and keys, forms, effects done honestly, data fetching with
-race protection, refs, context and reducers, custom hooks, and performance
-patterns — all graded through the accessible DOM, never implementation
-details — then interview prep.
+Browser verification starts its own loopback preview server on port 5587 and uses disposable browser contexts. Build first and use a new empty output directory for each run. Set `IPSKILL_BROWSER_OUTPUT` to choose it; optionally set `ASTRA_BROWSER_EXECUTABLE` to an already installed compatible Chromium executable. Existing evidence and occupied ports are refused. The browser script requires Python with Playwright; application use does not.
 
-**C# (17)** — types and variables, control flow, classes, inheritance,
-interfaces, structs and records, generics, collections, delegates and
-lambdas, LINQ (two lessons that explicitly bridge to your SQL), exceptions,
-and deterministic async/await — then interview prep.
+## Curriculum authoring
 
-**ASP.NET Core (13)** — minimal APIs, routing, dependency injection (with a
-gate that catches captive dependencies), middleware order, configuration,
-EF Core on SQLite (including a gate that fails hidden N+1 queries),
-REST CRUD, errors and logging, JWT auth and integration testing — then
-interview prep.
+The original packs under `public/content` are retained. `src/catalog.json` contains their compact identity, kind and reward catalog. Keep packs, index and catalog consistent when making a reviewed curriculum release.
 
-## The drill sets (Volume 2)
+```powershell
+node scripts/merge-content.mjs new_volume candidate_name
+node scripts/validate-content.mjs candidate_name
+```
 
-Every track carries a **"Drill sets" part** before its interview part — pure
-problem sets, 8 exercises each, that turn the concepts into reflexes: 24
-drill lessons per new track and 60 for SQL, nearly 1,450 exercises of fresh
-practice. Each set names the lessons it draws on ("these eight problems
-drill narrowing — redo lessons 04 and 10 if this feels like guessing"),
-ramps from direct application to interview-hard, and its `reading.md`
-explains every problem after the fact: what it was really testing, the
-classic mistake, and the model answer's reasoning. Nothing restates an
-earlier exercise — every problem is new.
+The merge tool reads an authored volume and creates a new directory under `content-candidates`. It refuses duplicate or incomplete lessons and existing candidate names. Published content is not overwritten. A failed generation can leave an incomplete candidate directory; a candidate is not a release. Review lesson accuracy, promote the packs/index/catalog together in a separate reviewed checkout, and rerun application checks.
 
-## Interview prep
+The volume-three assembler requires a new output name and refuses to overwrite an existing authored file. It also rejects duplicate section markers. Earlier source versions are retained as text under `docs/original` for comparison.
 
-Every track ends with it, and it is the part built for repetition: a 50+
-question bank with model answers tagged ⭐ to ⭐⭐⭐ by interview frequency,
-interviewer-voiced graded drills with time-boxes (each track has a
-45-minute realistic take-home), and rapid-fire re-tests of the ⭐⭐⭐
-concepts — all wired into the spaced-review ladder (3 → 7 → 21 → 60 days)
-so the most-asked material keeps coming back until it's reflex. The full
-guide, including a pre-interview schedule, is
-[docs/interview-prep.md](docs/interview-prep.md).
+## Practical limits
 
-## The reading
-
-Every lesson ships `reading.md` beside its `README.md`: the mental model
-(`## Notes`), one section per exercise on what that problem was *really*
-testing, and `## Further reading` links into primary documentation (the
-PostgreSQL manual, the TypeScript handbook, react.dev, nodejs.org,
-learn.microsoft.com). Read it after you attempt a problem, not before —
-failing first and reading second is the version of studying that sticks.
-`dojo status` counts readings opened; it is the one number worth maximising.
-
-## The dataset (SQL track)
-
-50,000 customers, 10,000 products, 500,000 orders, 1M order items, 1M
-reviews, 3M clickstream events, and a 500-person staff org chart —
-deterministic (fixed seeds, fixed timestamps), so your numbers match the
-lessons' numbers on any machine. Tour it in [docs/dataset.md](docs/dataset.md);
-exact figures live in [docs/dataset_facts.md](docs/dataset_facts.md).
-
-## Honesty model
-
-Hints, reference queries, and author solutions (`.reference/`) sit in plain
-sight in the lesson directories. Nothing is encrypted — this course belongs
-to you, and the CLI just makes the honest path the convenient path:
-`dojo hint` reveals hints progressively and notes how many you used (no
-penalty). You're here to learn, not to beat a proctor.
-
-## Troubleshooting
-
-- **`Cannot reach PostgreSQL`** — `uv run dojo up`, wait a few seconds,
-  retry. Is Docker Desktop running? (SQL track only — no other track needs
-  Docker.)
-- **`Template 'dojo_template' missing`** — `uv run dojo seed`.
-- **JS gates fail with a module error** — `uv run dojo setup typescript`
-  (one install covers typescript/node/react).
-- **C#/.NET gates won't build** — `uv run dojo setup csharp` /
-  `uv run dojo setup dotnet`; `uv run dojo doctor` names what's missing.
-- **Hangs connecting on Windows/Docker Desktop** — keep
-  `POSTGRES_HOST=127.0.0.1` in `.env` (IPv6 `localhost` can hang).
-- **SQL speed gates feel unfair after a hardware change** —
-  `uv run dojo reset-baseline`.
-- **Port in use** — change `POSTGRES_PORT` in `.env`.
-- **Start truly over** — `docker compose down -v`, then `dojo up` +
-  `dojo seed`. Progress lives in `data/progress.json`; delete it to reset
-  every track's dashboard.
+Workspace size is limited to 8 MiB, notes to 100,000 characters per mission, projects to 100 and snapshots to ten. There is no authentication, shared server, cloud backup, automatic grading, account recovery or public deployment in this app. The backend, ownership and booking projects in the course are future exercises with explicit acceptance criteria.

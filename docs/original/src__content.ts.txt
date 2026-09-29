@@ -1,0 +1,24 @@
+import type { ContentIndex, ResourceDoc, TrackPack } from './types'
+
+const cache = new Map<string, TrackPack>()
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`Could not load ${url} (${response.status})`)
+  return response.json() as Promise<T>
+}
+
+export const loadIndex = () => getJson<ContentIndex>('/content/index.json')
+
+export async function loadTrack(id: string): Promise<TrackPack> {
+  const cached = cache.get(id)
+  if (cached) return cached
+  const pack = await getJson<TrackPack>(`/content/${id}.json`)
+  cache.set(id, pack)
+  return pack
+}
+
+export async function loadResources(): Promise<ResourceDoc[]> {
+  const data = await getJson<{ resources: ResourceDoc[] }>('/content/resources.json')
+  return data.resources
+}

@@ -1,1 +1,0 @@
--- 35_order_by_and_indexes/ex1: your CREATE INDEX here

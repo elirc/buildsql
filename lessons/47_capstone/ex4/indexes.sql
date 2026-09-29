@@ -1,1 +1,0 @@
--- 47_capstone/ex4: your CREATE INDEX here (see README.md)

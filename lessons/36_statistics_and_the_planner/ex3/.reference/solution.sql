@@ -1,2 +1,0 @@
-ALTER TABLE hot_orders ALTER COLUMN status SET STATISTICS 1000;
-ANALYZE hot_orders;

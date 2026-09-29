@@ -1,0 +1,110 @@
+import type { Lesson, Mission, SaveState } from './types'
+
+export const SAVE_KEY = 'ipskill.save.v1'
+export const REVIEW_INTERVALS = [3, 7, 21, 60, 120, 240, 365, 540, 730, 1095]
+
+export const initialSave: SaveState = {
+  version: 1,
+  playerName: 'Rookie',
+  completed: {},
+  earnedXp: {},
+  attempts: {},
+  work: {},
+  reviews: {},
+  streak: 0,
+  lastActive: null,
+  selectedTrack: 'sql',
+}
+
+export function loadSave(): SaveState {
+  try {
+    const raw = localStorage.getItem(SAVE_KEY)
+    if (!raw) return { ...initialSave }
+    const value = JSON.parse(raw) as Partial<SaveState>
+    return {
+      ...initialSave,
+      ...value,
+      completed: value.completed ?? {},
+      earnedXp: value.earnedXp ?? {},
+      attempts: value.attempts ?? {},
+      work: value.work ?? {},
+      reviews: value.reviews ?? {},
+    }
+  } catch {
+    return { ...initialSave }
+  }
+}
+
+export function persistSave(save: SaveState) {
+  localStorage.setItem(SAVE_KEY, JSON.stringify(save))
+}
+
+export function missionKey(lesson: Lesson, mission: Mission) {
+  return `${lesson.id}/${mission.id}`
+}
+
+export function xpFor(save: SaveState, lessons: Lesson[] = []) {
+  void lessons
+  return Object.values(save.earnedXp).reduce((total, value) => total + value, 0)
+}
+
+export function levelFor(xp: number) {
+  return Math.floor(Math.sqrt(xp / 350)) + 1
+}
+
+export function progressToNextLevel(xp: number) {
+  const level = levelFor(xp)
+  const start = (level - 1) ** 2 * 350
+  const end = level ** 2 * 350
+  return { level, current: xp - start, needed: end - start, percent: ((xp - start) / (end - start)) * 100 }
+}
+
+export function lessonUnlocked(lessons: Lesson[], index: number, save: SaveState) {
+  if (index === 0) return true
+  const previous = lessons[index - 1]
+  return previous.exercises
+    .filter((mission) => mission.kind === 'core')
+    .every((mission) => save.completed[missionKey(previous, mission)])
+}
+
+export function missionUnlocked(lesson: Lesson, mission: Mission, save: SaveState) {
+  const core = lesson.exercises.filter((item) => item.kind === 'core')
+  if (mission.kind !== 'core') {
+    return core.every((item) => save.completed[missionKey(lesson, item)])
+  }
+  const index = core.findIndex((item) => item.id === mission.id)
+  if (index <= 0) return true
+  return Boolean(save.completed[missionKey(lesson, core[index - 1])])
+}
+
+export function completeMission(save: SaveState, id: string, now = new Date(), reward = 100): SaveState {
+  const day = now.toISOString().slice(0, 10)
+  const yesterday = new Date(now)
+  yesterday.setDate(yesterday.getDate() - 1)
+  const next = structuredClone(save)
+  next.attempts[id] = (next.attempts[id] ?? 0) + 1
+  if (!next.completed[id]) {
+    next.completed[id] = now.toISOString()
+    next.earnedXp[id] = reward
+    const due = new Date(now)
+    due.setDate(due.getDate() + REVIEW_INTERVALS[0])
+    next.reviews[id] = { stage: 0, due: due.toISOString() }
+  } else if (next.reviews[id] && new Date(next.reviews[id].due) <= now) {
+    const stage = Math.min(next.reviews[id].stage + 1, REVIEW_INTERVALS.length - 1)
+    const due = new Date(now)
+    due.setDate(due.getDate() + REVIEW_INTERVALS[stage])
+    next.reviews[id] = { stage, due: due.toISOString() }
+  }
+  if (save.lastActive !== day) {
+    next.streak = save.lastActive === yesterday.toISOString().slice(0, 10) ? save.streak + 1 : 1
+    next.lastActive = day
+  }
+  return next
+}
+
+export function dueReviewIds(save: SaveState, now = new Date()) {
+  return Object.entries(save.reviews)
+    .filter(([, review]) => new Date(review.due) <= now)
+    .sort((a, b) => a[1].due.localeCompare(b[1].due))
+    .map(([id]) => id)
+}

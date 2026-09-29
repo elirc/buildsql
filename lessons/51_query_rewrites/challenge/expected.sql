@@ -1,5 +1,0 @@
-SELECT DISTINCT c.id, c.name
-FROM customers c
-JOIN orders o ON o.customer_id = c.id
-WHERE date_trunc('day', o.created_at) = TIMESTAMPTZ '2023-06-15 00:00:00+00'
-   OR c.email = 'user4242@example.com';

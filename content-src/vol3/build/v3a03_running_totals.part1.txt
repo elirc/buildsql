@@ -1,0 +1,688 @@
+@@@META
+{
+  "slug": "v3a03_running_totals",
+  "title": "V3·A3 — Running totals, moving averages, and cumulative aggregates",
+  "summary": "Cumulative arithmetic is the bread and butter of reporting: month-to-date, high-water marks, seven-day averages, share-of-total curves. This sector is about doing it correctly — aggregating to the right grain first, filling the holes in the series, and knowing when a trailing average is averaging fewer rows than it claims."
+}
+@@@FILE briefing.md
+# V3·A3 — Running totals, moving averages, and cumulative aggregates
+
+Every dashboard has a cumulative column on it. Month-to-date revenue,
+year-to-date headcount, total users acquired, the best day so far, the
+seven-day average that smooths out the weekend. All of them are the same
+construction — an aggregate over an ordered window — and all of them are
+easy to get subtly wrong in ways nobody catches, because a cumulative column
+always *looks* plausible.
+
+Sector v3a01_window_frames gave you the mechanism: `ORDER BY` inside `OVER`
+installs a frame that runs from the start of the partition to the current
+row, and every aggregate you know becomes cumulative over it. This sector is
+about using that mechanism on real time series, where three things reliably
+go wrong: the grain, the holes, and the edges.
+
+## Concept
+
+The core shapes, all of which you can now read as frames:
+
+```sql
+sum(revenue)   OVER (ORDER BY day)                     -- running total
+max(revenue)   OVER (ORDER BY day)                     -- high-water mark
+count(*)       OVER (ORDER BY day)                     -- how many so far
+sum(revenue)   OVER (PARTITION BY status ORDER BY day) -- resets per status
+avg(revenue)   OVER (ORDER BY day ROWS BETWEEN 6 PRECEDING
+                                      AND CURRENT ROW) -- 7-row trailing mean
+sum(revenue)   OVER ()                                 -- the denominator
+```
+
+The last one is the one people forget they can combine with the first:
+
+```sql
+round(100 * sum(revenue) OVER (ORDER BY day) / sum(revenue) OVER (), 2)
+```
+
+is a cumulative-share-of-total curve in a single expression, two windows,
+one pass.
+
+## The grain
+
+The single most important habit in this sector: **aggregate to the grain of
+the report, then window over that.**
+
+```sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01' AND created_at < '2023-11-01'
+    GROUP BY 1
+)
+SELECT day, revenue, sum(revenue) OVER (ORDER BY day) AS mtd
+FROM daily
+ORDER BY day;
+```
+
+The `WindowAgg` here sees 31 rows. Write the same report by windowing the
+raw table and it sees sixteen thousand, sorts them, and produces a
+month-to-date figure on every individual order — which you then have to
+collapse with a `DISTINCT` that hides the mistake. Rolling up first is not
+an optimisation; it is the correct expression of a report whose grain is
+"one row per day".
+
+## The holes
+
+A daily series built from data has a row only on days when something
+happened. That is fine for a running total — a missing day contributes
+nothing — and wrong for almost everything else:
+
+- `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW` reaches back six *rows*. If the
+  series skips three days, that frame spans ten calendar days and your
+  "seven-day average" is nothing of the sort.
+- A chart with missing days draws a straight line across the gap and lies
+  about it.
+
+Two fixes, and they are not equivalent. The first is `RANGE BETWEEN INTERVAL
+'6 days' PRECEDING AND CURRENT ROW`, which measures calendar time and simply
+averages fewer rows across a quiet stretch. The second is a **calendar
+spine**: generate every date in the range and left-join the data onto it, so
+the quiet days exist as zeroes.
+
+```sql
+WITH days AS (
+    SELECT d::date AS day
+    FROM generate_series('2023-06-01'::date, '2023-06-30'::date,
+                         INTERVAL '1 day') AS d
+),
+counted AS (
+    SELECT days.day, count(r.id) AS reviews
+    FROM days
+    LEFT JOIN reviews r
+           ON r.created_at >= days.day
+          AND r.created_at <  days.day + 1
+    GROUP BY days.day
+)
+SELECT * FROM counted ORDER BY day;
+```
+
+Note `count(r.id)`, not `count(*)`: the left join manufactures one
+NULL-padded row per empty day, and `count(*)` would count it as one review.
+
+The spine is the more honest fix, because it makes "nothing happened" a
+visible zero rather than an absent row, and every subsequent frame — `ROWS`
+or `RANGE` — then means what it says. It also costs you a join, and on a
+long history with a fine grain that join is not free.
+
+## The edges
+
+A trailing seven-day average has a beginning. On day one it averages one
+day; on day three, three. Publishing those as if they were seven-day
+averages is the most common quiet lie in time-series reporting. The honest
+version counts the frame:
+
+```sql
+CASE WHEN count(*) OVER w = 7 THEN round(avg(revenue) OVER w, 2) END AS ma7
+```
+
+`count(*)` over the same frame tells you how many rows the average actually
+saw. If it is not seven, return NULL and let the chart show a gap.
+
+## Exercise 1 — year to date
+
+Monthly revenue and order count for 2023, each month carrying the totals
+accumulated so far.
+
+## Exercise 2 — an accumulation that resets
+
+Hires per department per year, with a cumulative headcount that restarts at
+every department.
+
+## Exercise 3 — high-water marks
+
+Daily purchase events with a running total, a running best day, and a
+running count of days.
+
+## Exercise 4 — a trailing average, honestly
+
+October's daily revenue with a seven-day trailing mean, and a second column
+that refuses to report one until seven days actually exist.
+
+## Exercise 5 — rows are not days
+
+The same trailing average over a sparse series, computed both positionally
+and in calendar time, so the two answers can be compared row by row.
+
+## Exercise 6 — the calendar spine
+
+June's daily review counts with every empty day present as a zero, and a
+rolling seven-day sum that is finally trustworthy.
+
+## Exercise 7 — the cumulative share curve
+
+Customers by country, biggest first, with the running percentage of the
+customer base accounted for.
+
+## Exercise 8 — cumulative and total in one pass
+
+Monthly revenue per order status, each row carrying both its
+status-to-date total and its status's full-year total.
+
+## Challenge — a spine, a partition and a share
+
+Daily review counts per rating for June, with no missing days, a cumulative
+count per rating, and each rating's progress towards its own monthly total.
+
+## Spaced review
+
+`review1/`: the Canadian signup curve — new customers per month and the
+cumulative total, straight from `customers.created_at`.
+@@@FILE explanation.md
+# Reading - sql/v3a03_running_totals
+
+Cumulative columns are the easiest window functions to write and the hardest
+to review, because a wrong one still climbs.
+
+## Notes
+
+**The default frame is what makes an aggregate cumulative.** `sum(x) OVER
+(ORDER BY d)` is not a special "running sum" function; it is `sum` over
+`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. Every aggregate behaves
+the same way over that frame: `max` becomes a high-water mark, `count`
+becomes "how many so far", `bool_or` becomes "has it happened yet",
+`string_agg` becomes an accumulating list. Once the frame is the thing you
+are thinking about, there is nothing left to memorise.
+
+**Grain first, window second.** A report with one row per day should
+aggregate to one row per day before any window runs. This is not merely
+faster: windowing the raw rows produces a running total *per order*, which
+is a different report that happens to contain the one you wanted.
+
+**A missing row is not a zero.** In a running total those are the same
+thing. In a moving average, a share-of-total, or a "days since" calculation
+they are not. Decide explicitly which one your series contains, and if you
+need zeroes, build a spine with `generate_series` and `LEFT JOIN`.
+
+**`count(r.id)` versus `count(*)` after a left join.** The join fabricates a
+row for every empty day. `count(*)` counts it; `count(r.id)` does not,
+because the padded columns are NULL. This one-character difference is the
+difference between a spine that works and a series where every quiet day
+reports exactly one event.
+
+**`ROWS` counts rows; `RANGE` with an interval counts time.** On a dense
+daily series they agree, which is why the bug hides. On a sparse series they
+disagree on every row after the first gap. Choosing `RANGE BETWEEN INTERVAL
+'6 days' PRECEDING AND CURRENT ROW` states an assumption — "seven calendar
+days" — that a reviewer can check.
+
+**Partial frames need admitting.** The first six rows of a seven-day
+trailing average are averages of one to six rows. `count(*)` over the same
+frame is the standard way to detect that and blank the column. The
+alternative — publishing them — makes the start of every chart look like a
+ramp that is entirely an artefact of the window.
+
+**Two windows in one expression is normal.** `sum(x) OVER (ORDER BY d) /
+sum(x) OVER ()` is a cumulative share. `sum(x) OVER (PARTITION BY g ORDER BY
+d) / sum(x) OVER (PARTITION BY g)` is a cumulative share within a group.
+PostgreSQL evaluates each distinct window once, so the cost is one extra
+aggregate, not one extra scan.
+
+**Types.** `sum` over `numeric` is `numeric`; `sum` over `bigint` is also
+`numeric`, which surprises people the first time a running count comes back
+with a decimal point in its type. `avg` over `numeric` is `numeric`, so
+`round(..., 2)` works with no cast. The moment a `double precision` enters —
+from `extract(epoch ...)`, or a float column — `round(x, 2)` stops existing
+and you need `round(x::numeric, 2)`.
+
+## ex1 — year to date
+
+Two cumulative columns over the same window, one of a `numeric` and one of a
+`bigint`. The point is the shape and the habit of rolling up first.
+
+## ex2 — an accumulation that resets
+
+`PARTITION BY department` is the entire difference between a departmental
+growth curve and a company one. The classic mistake is a single unpartitioned
+window, which produces numbers that increase within each department *and*
+carry over between them.
+
+## ex3 — high-water marks
+
+`max` over the cumulative frame. Worth noticing that "the best day so far"
+is monotone non-decreasing by construction, which makes it easy to
+eyeball-verify: any dip is a bug.
+
+## ex4 — a trailing average, honestly
+
+Two columns from one frame: the average, and the count that says whether the
+average is worth printing. Once you have seen this, the `CASE` costs nothing
+and buys a reviewable claim.
+
+## ex5 — rows are not days
+
+Reviews for a single product are sparse — most days have none. The
+positional and calendar versions disagree on exactly the rows that follow a
+gap, which is why the exercise asks for both in the same result.
+
+## ex6 — the calendar spine
+
+`generate_series` over dates, a `LEFT JOIN`, and `count(r.id)`. The rolling
+seven-day sum on top is only correct *because* the spine made every day
+exist.
+
+## ex7 — the cumulative share curve
+
+The concentration curve: sort descending, accumulate, divide by the total.
+The final row is 100.00 by construction, which is the cheapest possible
+self-check.
+
+## ex8 — cumulative and total in one pass
+
+Two windows over the same partition, one ordered and one not. The
+unordered one is the denominator; the ordered one is the numerator.
+
+## challenge — a spine, a partition and a share
+
+Everything at once: `generate_series` crossed with the five ratings so that
+every (day, rating) pair exists, then a partitioned cumulative count, then a
+partitioned total.
+
+## review1 — a signup curve
+
+The simplest cumulative report there is, from a table you have not used for
+one yet.
+
+## Further reading
+
+- [Window Function Calls](https://www.postgresql.org/docs/16/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — the frame grammar, including the `RANGE ... INTERVAL` form used in ex5.
+- [Set Returning Functions](https://www.postgresql.org/docs/16/functions-srf.html) — `generate_series`, including the timestamp variants that build calendar spines.
+- [Aggregate Functions](https://www.postgresql.org/docs/16/functions-aggregate.html) — return types, and the `FILTER` clause that pairs beautifully with cumulative windows.
+- [Date/Time Functions](https://www.postgresql.org/docs/16/functions-datetime.html) — `date_trunc`, and why `date_trunc('day', ts)` returns a timestamp rather than a date.
+- [Numeric Types](https://www.postgresql.org/docs/16/datatype-numeric.html) — why `sum` of a `bigint` is `numeric`, and what that does to your `round` calls.
+@@@FILE fullReadme.md
+# V3·A3 — Running totals, moving averages, and cumulative aggregates
+
+Three questions, one mechanism: how much so far, how much lately, and how
+much of the whole.
+
+## Concept
+
+### Cumulative
+
+```sql
+SELECT month, revenue,
+       sum(revenue)   OVER (ORDER BY month) AS ytd,
+       max(revenue)   OVER (ORDER BY month) AS best_so_far,
+       count(*)       OVER (ORDER BY month) AS months_so_far
+FROM monthly
+ORDER BY month;
+```
+
+All three come from the default frame — start of partition through current
+row. Nothing in the query says "running"; the frame says it.
+
+### Resetting
+
+```sql
+sum(revenue) OVER (PARTITION BY status ORDER BY month)
+```
+
+The partition restarts the accumulation. Without it, a status's first month
+inherits the previous status's total, and the numbers look almost right.
+
+### Moving
+
+```sql
+avg(revenue) OVER (ORDER BY day ROWS  BETWEEN 6 PRECEDING AND CURRENT ROW)
+avg(revenue) OVER (ORDER BY day RANGE BETWEEN INTERVAL '6 days' PRECEDING
+                                        AND CURRENT ROW)
+```
+
+The first counts seven rows. The second counts seven days. They differ
+exactly when the series has holes.
+
+### Share of total
+
+```sql
+round(100 * revenue / sum(revenue) OVER (), 2)                       -- this row's share
+round(100 * sum(revenue) OVER (ORDER BY day) / sum(revenue) OVER (), 2)  -- cumulative
+```
+
+### The calendar spine
+
+```sql
+WITH days AS (
+    SELECT d::date AS day
+    FROM generate_series('2023-06-01'::date,
+                         '2023-06-30'::date,
+                         INTERVAL '1 day') AS d
+)
+SELECT days.day, count(r.id) AS reviews
+FROM days
+LEFT JOIN reviews r ON r.created_at >= days.day
+                   AND r.created_at <  days.day + 1
+WHERE r.product_id IS NULL OR r.product_id <= 3
+GROUP BY days.day
+ORDER BY days.day;
+```
+
+Two details carry all the weight. `count(r.id)` rather than `count(*)`, so
+that an empty day counts zero. And any filter on the *right* table of a left
+join has to be in the `ON` clause, or in a `WHERE` written to tolerate the
+NULL-padded rows — a `WHERE r.product_id <= 3` on its own would discard
+every empty day and undo the entire spine.
+
+The cleaner spelling puts the filter where it belongs:
+
+```sql
+LEFT JOIN reviews r ON r.product_id <= 3
+                   AND r.created_at >= days.day
+                   AND r.created_at <  days.day + 1
+```
+
+## Worked example — a seven-day average that admits what it is
+
+```sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day, sum(total) AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01' AND created_at < '2023-11-01'
+    GROUP BY 1
+)
+SELECT day, revenue,
+       round(avg(revenue) OVER w, 2)                       AS ma7_naive,
+       count(*) OVER w                                     AS days_in_window,
+       CASE WHEN count(*) OVER w = 7
+            THEN round(avg(revenue) OVER w, 2) END         AS ma7
+FROM daily
+WINDOW w AS (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+ORDER BY day;
+```
+
+```
+    day     | revenue  | ma7_naive | days_in_window | ma7
+------------+----------+-----------+----------------+----------
+ 2023-10-01 | 41500.00 |  41500.00 |              1 |
+ 2023-10-02 | 38200.00 |  39850.00 |              2 |
+ ...
+ 2023-10-07 | 44900.00 |  41120.00 |              7 | 41120.00
+```
+
+`ma7_naive` on 2023-10-01 is a one-day average wearing a seven-day label.
+The `CASE` version says nothing until it can say something true.
+
+## Worked example — cumulative share, and the check that comes free
+
+```sql
+WITH by_country AS (
+    SELECT country, count(*) AS customers
+    FROM customers
+    GROUP BY country
+)
+SELECT country, customers,
+       sum(customers) OVER w AS cum_customers,
+       round(100 * sum(customers) OVER w / sum(customers) OVER (), 2) AS cum_pct
+FROM by_country
+WINDOW w AS (ORDER BY customers DESC, country)
+ORDER BY customers DESC, country;
+```
+
+The last row must print exactly `100.00`. If it does not, either the
+denominator is filtered differently from the numerator, or the ordering is
+not total and the accumulation is skipping peers.
+
+## Worked example — a running total that resets, and one that does not
+
+The difference is one clause, and the numbers stay plausible either way,
+which is what makes it worth a worked example rather than a footnote.
+
+```sql
+WITH monthly AS (
+    SELECT status,
+           date_trunc('month', created_at)::date AS month,
+           sum(total) AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+)
+SELECT month, status, revenue,
+       sum(revenue) OVER (PARTITION BY status ORDER BY month) AS per_status,
+       sum(revenue) OVER (ORDER BY status, month)             AS global_running
+FROM monthly
+ORDER BY status, month;
+```
+
+```
+   month    | status    | revenue | per_status | global_running
+------------+-----------+---------+------------+---------------
+ 2023-01-01 | cancelled |  100.00 |     100.00 |         100.00
+ 2023-02-01 | cancelled |  120.00 |     220.00 |         220.00
+ 2023-01-01 | paid      |  400.00 |     400.00 |         620.00
+ 2023-02-01 | paid      |  450.00 |     850.00 |        1070.00
+```
+
+`per_status` restarts at 400.00 when `paid` begins. `global_running` does
+not — it carries `cancelled`'s 220 into `paid`'s first month, producing a
+column that is arithmetically correct and semantically meaningless. Nothing
+in the output shouts; you have to know which one you asked for.
+
+The same trap applies to a moving average: without `PARTITION BY`, the first
+few rows of each group average across the boundary and quietly blend two
+unrelated series.
+
+## Worked example — combining FILTER with a cumulative window
+
+`FILTER` restricts what an aggregate sees, and it composes with windows:
+
+```sql
+SELECT day, orders,
+       sum(orders) OVER w                                  AS cum_all,
+       sum(orders) FILTER (WHERE weekend) OVER w           AS cum_weekend
+FROM daily
+WINDOW w AS (ORDER BY day)
+ORDER BY day;
+```
+
+This is the tidy way to accumulate two different subsets in one pass without
+writing `sum(CASE WHEN weekend THEN orders ELSE 0 END)`. The `FILTER` clause
+goes between the aggregate and the `OVER`, and it is worth knowing because
+the `CASE` version silently converts "no weekend days yet" into `0` where
+`FILTER` correctly returns NULL.
+
+## Common mistakes
+
+- **Windowing the raw table.** Half a million running totals collapsed with
+  `DISTINCT` is a report that accidentally works.
+- **Forgetting `PARTITION BY` on a per-group curve.** The second group's
+  first row inherits the first group's total. It looks like a data problem.
+- **`count(*)` after a left join to a spine.** Every empty day reports one.
+- **Filtering the right-hand table of a spine join in `WHERE`.** Turns the
+  outer join back into an inner one and deletes exactly the rows the spine
+  existed to create.
+- **`ROWS n PRECEDING` on a sparse series.** A "seven-day" average over ten
+  calendar days, silently.
+- **Publishing partial windows.** The first days of every chart ramp for no
+  reason.
+- **Mixing the numerator's filter and the denominator's.** `sum(x) OVER ()`
+  covers whatever survived `WHERE`; if the two windows should cover different
+  populations, one of them needs its own subquery.
+- **`round` on a `double precision`.** `round(x, 2)` does not exist for
+  floats. Cast: `round(x::numeric, 2)`.
+
+## The interview answer
+
+> *How would you compute a seven-day moving average of daily revenue?*
+
+Roll the orders up to one row per day first, then `avg(revenue) OVER
+(ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)`. Two caveats I would
+raise before shipping it. First, if the series can have days with no orders,
+`ROWS` reaches back six *rows*, not six days — either use `RANGE BETWEEN
+INTERVAL '6 days' PRECEDING` or build a calendar spine with
+`generate_series` and left-join the data so every day exists. Second, the
+first six rows average fewer than seven days; I would add `count(*)` over the
+same frame and return NULL until it reaches seven, so the chart does not
+show a fake ramp.
+
+## Check yourself
+
+1. Why is `sum(x) OVER (ORDER BY d)` cumulative? Name the frame.
+2. What is `max(x) OVER (ORDER BY d)` called in a report, and why can it
+   never decrease?
+3. What changes if you add `PARTITION BY g` to a running total?
+4. What is the type of `sum(count(*))`? Of `avg(numeric_column)`?
+5. Write a seven-day trailing average two ways, and say when they differ.
+6. Your daily series is missing three days in March. What does `ROWS
+   BETWEEN 6 PRECEDING` compute on 20 March?
+7. Build a calendar spine for June 2023 with `generate_series`.
+8. After left-joining to a spine, why is `count(*)` wrong?
+9. Where must a filter on the right table of that join go, and why?
+10. How do you blank out a moving average until its window is full?
+11. Write a cumulative share-of-total column, and state the check that
+    proves it is right.
+12. What does `sum(x) OVER ()` cover when the query has a `WHERE` clause?
+13. Why should you aggregate before windowing rather than after?
+14. Give three cumulative reports that are the *same* window with a
+    different aggregate.
+@@@FILE fullReading.md
+# Reading - sql/v3a03_running_totals
+
+The running total is the oldest report in commercial computing. It predates
+SQL by decades: a mainframe batch job read a sorted tape, kept an
+accumulator in a register, and printed it beside every record. That model —
+sorted input, one accumulator, one pass — is exactly what PostgreSQL's
+`WindowAgg` node does, and knowing it explains both why cumulative windows
+are cheap and why some of their cousins are not.
+
+## What the executor does with a cumulative frame
+
+For `sum(x) OVER (ORDER BY d)`, the frame is `UNBOUNDED PRECEDING` to
+`CURRENT ROW`. That frame only ever grows, so the executor keeps a single
+aggregate transition state, adds each new row's value to it, and emits the
+running result. One pass, constant memory per partition beyond the buffered
+rows themselves. This is the tape-drive algorithm, unchanged.
+
+Now consider a sliding frame — `ROWS BETWEEN 6 PRECEDING AND CURRENT ROW`.
+Rows leave the frame from the back as well as entering at the front, so a
+naive implementation would recompute the whole aggregate at every row: seven
+additions per row instead of one. PostgreSQL avoids that when it can, using
+an *inverse transition function*: `sum` knows how to subtract, so the
+executor adds the incoming row and subtracts the outgoing one, and the
+sliding sum stays O(1) per row. `count` and `avg` have inverses too.
+
+`max` and `min` do not. There is no way to "un-max" a value: if the row
+leaving the frame happened to hold the maximum, the new maximum could be
+anything, and the only way to find it is to look. So a sliding `max` over a
+wide frame is O(frame width) per row. On a seven-row frame nobody notices;
+on a 10,000-row frame over a million rows it is ten billion comparisons and
+a query that never finishes. If you need a wide sliding maximum, the usual
+escapes are to aggregate to a coarser grain first, or to reach for a
+different algorithm entirely.
+
+There is a third case worth knowing: `RANGE` and `GROUPS` frames with
+offsets require the executor to find the boundary by comparing values rather
+than counting positions, so it performs a small search at each row. That
+cost is logarithmic-ish and rarely matters, but it is why an interval-based
+moving average is measurably slower than the positional one on a large
+series — you are buying correctness on sparse data with a little CPU.
+
+## Where the holes come from
+
+A time series built by `GROUP BY date_trunc('day', ...)` has exactly the days
+on which something happened. This is not a defect of the query; it is what
+the data says. The mistake is treating the result as a dense series
+afterwards.
+
+The fix has a name in dimensional modelling: a **date dimension**, a table
+with one row per calendar day, usually carrying extras like weekday, month
+name, fiscal period and holiday flags. Data warehouses materialise it once
+and join to it forever. In an ad-hoc query, `generate_series` is the
+throwaway version of the same idea:
+
+```sql
+SELECT d::date FROM generate_series(DATE '2023-06-01', DATE '2023-06-30',
+                                    INTERVAL '1 day') AS d;
+```
+
+`generate_series` over timestamps returns `timestamptz` values, which is why
+the `::date` cast appears in almost every real use — and why joining
+`day = date_trunc('day', created_at)` works while `day = created_at::date`
+compared against a timestamp does not. Keep the types straight and prefer
+half-open range predicates (`>= day AND < day + 1`) over `date_trunc`
+equality: the range form can use an index on the timestamp column, the
+`date_trunc` form cannot unless you build an expression index for it.
+
+The join direction matters as much as the series. The spine must be the
+*left* table, the data must be the right one, and any predicate on the data
+must live in the `ON` clause. A `WHERE r.product_id = 3` after a left join
+evaluates to unknown on every NULL-padded row, discards it, and quietly
+converts the outer join back to an inner one. This is the single most common
+way a correct spine query becomes an incorrect one during review, precisely
+because moving a condition from `ON` to `WHERE` looks like a stylistic edit.
+
+## History and portability
+
+Window functions entered SQL:2003 and PostgreSQL 8.4 (2009). Before that,
+the portable running total was a correlated subquery:
+
+```sql
+SELECT d.day, d.revenue,
+       (SELECT sum(x.revenue) FROM daily x WHERE x.day <= d.day) AS mtd
+FROM daily d ORDER BY d.day;
+```
+
+Correct, quadratic, and still the right tool in the rare case where the
+cumulative predicate is not expressible as a frame — "the sum of every prior
+row whose category matches a pattern computed from this row", say. The
+window rewrite of that shape does not exist, and a correlated subquery over
+31 rows costs nothing. Reach for the frame first, but do not treat the
+subquery as forbidden.
+
+Two portability notes, because cumulative reports travel between engines
+more than most SQL. `RANGE` with an offset — the interval form — is
+SQL:2011 and arrived in PostgreSQL 11; older PostgreSQL and several other
+engines support only `RANGE UNBOUNDED PRECEDING`/`CURRENT ROW`, so a
+seven-day average written that way will not run there. And `sum` over an
+integer column returns `bigint` or `numeric` depending on the input type,
+which changes how downstream code has to parse it; if a client library
+surprises you with strings where you expected numbers, this is usually why.
+
+## Performance notes
+
+**Roll up before you window.** The dominant cost of a cumulative report is
+the sort beneath the `WindowAgg`. Sorting 31 rows is free; sorting 500,000
+is not. Aggregating first also shrinks the tuplestore the window node
+buffers, which is what keeps the query inside `work_mem` and off the disk.
+
+**Push the time filter inside.** `WHERE created_at >= '2023-10-01'` belongs
+in the CTE that aggregates, not in the query that windows. PostgreSQL will
+not push a predicate through a `WindowAgg` unless it is on a partitioning
+column, because doing so could change the contents of other rows' frames.
+
+**Watch for spilling.** `EXPLAIN (ANALYZE, BUFFERS)` reports temp reads and
+writes when a window's partition does not fit in `work_mem`. A cumulative
+window over one giant partition is the classic trigger. Partitioning by
+something — even something you then ignore — can turn one huge buffer into
+many small ones.
+
+**Two windows are cheaper than two queries.** `sum(x) OVER (ORDER BY d)` and
+`sum(x) OVER ()` in the same select list are two `WindowAgg` nodes over the
+same scan, not two scans. The join-back alternative reads the table twice.
+
+## When not to do this
+
+**When the answer is a single number.** "Total revenue this year" is
+`sum(total)` with a `WHERE`. A cumulative column exists to show a *shape*
+over time; if nobody is looking at the shape, you are computing 365 numbers
+to throw away 364.
+
+**When the accumulation should be persisted.** A running balance that
+downstream systems reconcile against is a value with a lifetime, not a
+derived column recomputed on every query. At that point it belongs in a
+table, maintained transactionally, with the query used to verify it rather
+than to produce it.
+
+**When the series is enormous and the report is coarse.** Three million
+event rows windowed into a monthly chart is a sort you did not need. Roll
+up to months first, and let the window see twelve rows.
+
+**When a moving average hides what the reader needs.** Smoothing exists to
+make trends legible; it also erases spikes, and spikes are often the
+interesting part. Ship the raw series alongside the smoothed one, and let
+the person reading it decide which question they are asking.

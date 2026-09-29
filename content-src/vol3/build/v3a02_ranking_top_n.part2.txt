@@ -1,0 +1,524 @@
+@@@FILE ex1/prompt.md
+## Exercise 1 — the three functions, side by side
+
+Edit `ex1/solution.sql`.
+
+Works against `customers(id int, name text, email text, country text,
+created_at timestamptz)` and `orders(id int, customer_id int, status text,
+total numeric(10,2), created_at timestamptz)`. Restrict to the twenty
+customers with `id` from 1 to 20 — small enough to read the whole result.
+
+Support wants a leaderboard of those twenty by how many orders they have
+placed, numbered three different ways so they can decide which numbering
+they actually want. Customers who have never ordered must still appear, with
+an order count of `0`.
+
+Illustration on six customers:
+
+```
+ id | order_count | rn | rnk | drnk
+----+-------------+----+-----+-----
+  4 |          12 |  1 |   1 |    1
+  1 |           9 |  2 |   2 |    2
+  7 |           9 |  3 |   2 |    2
+  2 |           5 |  4 |   4 |    3
+  9 |           5 |  5 |   4 |    3
+  3 |           0 |  6 |   6 |    4
+```
+
+Read the tie at 9: `rn` numbers the two rows 2 and 3 (and needs `id` in its
+window's `ORDER BY` to decide which is which), `rnk` gives both 2 and then
+skips to 4, `drnk` gives both 2 and continues at 3.
+
+Columns, in this order: `id`, `name`, `order_count`, `rn`
+(`row_number`, ordered by `order_count` descending then `id` ascending),
+`rnk` (`rank`, ordered by `order_count` descending only), `drnk`
+(`dense_rank`, ordered by `order_count` descending only).
+
+**Ordered by `order_count` descending, then `id` ascending.** (20 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n ex1
+```
+@@@FILE ex1/hints.md
+## Hint 1
+
+Two stages. First you need one row per customer carrying a count — that is
+an aggregate over a join. Then you need three numberings of those rows —
+that is three window functions. Windows are computed after `GROUP BY`, so
+both stages can live in one query if you want them to.
+
+## Hint 2
+
+A window function may take an aggregate as its ordering expression in a
+grouped query:
+
+```sql
+SELECT department, count(*) AS headcount,
+       rank() OVER (ORDER BY count(*) DESC) AS size_rank
+FROM staff
+GROUP BY department;
+```
+
+The window sees the five post-aggregation rows, not the 500 input rows.
+
+## Hint 3
+
+The customer with no orders is the row that decides whether your join is
+right. `LEFT JOIN orders` keeps them; `count(o.id)` counts non-NULL order
+ids and gives `0`, while `count(*)` would count the single NULL-padded row
+and give `1`. The decision left to you is whether to do it in one query or
+to build the counts in a CTE first — both are correct, and one of them is
+much easier to debug.
+@@@FILE ex1/importantHints.md
+## Hint 1
+
+Predict the three columns before you write them. Take the scores 12, 9, 9,
+5, 5, 0 and write out `row_number`, `rank` and `dense_rank` by hand. If your
+`rank` column ever prints 3, you have written `dense_rank`; if your
+`dense_rank` ever skips a number, you have written `rank`.
+
+## Hint 2
+
+Now consider the failure that produces a plausible-looking wrong answer:
+
+```sql
+row_number() OVER (ORDER BY count(o.id) DESC)
+```
+
+Two customers tie on nine orders. Nothing here decides which gets 2 and
+which gets 3 — and PostgreSQL is free to answer differently on a different
+plan. The prompt specifies the tie-break for exactly this reason. Note that
+`rnk` and `drnk` do *not* need it: they give tied rows the same number by
+definition.
+
+## Hint 3
+
+If your zero-order customer is missing entirely, your join is inner. If they
+appear with `1`, you counted rows instead of order ids. Both bugs put them
+in the wrong place in the ranking, which is why the prompt's illustration
+puts a zero at the bottom.
+@@@FILE ex1/solution.sql
+-- v3a02_ranking_top_n / ex1 — row_number, rank and dense_rank on one result.
+SELECT c.id,
+       c.name,
+       count(o.id) AS order_count,
+       row_number() OVER (ORDER BY count(o.id) DESC, c.id) AS rn,
+       rank()       OVER (ORDER BY count(o.id) DESC)       AS rnk,
+       dense_rank() OVER (ORDER BY count(o.id) DESC)       AS drnk
+FROM customers c
+LEFT JOIN orders o ON o.customer_id = c.id
+WHERE c.id BETWEEN 1 AND 20
+GROUP BY c.id, c.name
+ORDER BY order_count DESC, c.id;
+@@@FILE ex1/expected.sql
+WITH counts AS (
+    SELECT c.id,
+           c.name,
+           count(o.id) AS order_count
+    FROM customers c
+    LEFT JOIN orders o ON o.customer_id = c.id
+    WHERE c.id BETWEEN 1 AND 20
+    GROUP BY c.id, c.name
+)
+SELECT id,
+       name,
+       order_count,
+       row_number() OVER (ORDER BY order_count DESC, id) AS rn,
+       rank()       OVER (ORDER BY order_count DESC)     AS rnk,
+       dense_rank() OVER (ORDER BY order_count DESC)     AS drnk
+FROM counts
+ORDER BY order_count DESC, id;
+@@@FILE ex2/prompt.md
+## Exercise 2 — ranking inside partitions
+
+Edit `ex2/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)` — all 500 rows. Department sizes are
+sales 138, engineering 112, ops 98, support 91, finance 61.
+
+HR wants an internal pay-position sheet: where each person sits within their
+own department, best paid first, and how many people they are being compared
+against. Ties share a position — two people on identical salaries are both
+"joint 4th" — so this is `rank`, not `row_number`.
+
+Illustration across two small departments:
+
+```
+ id | department  | salary    | dept_rank | dept_size
+----+-------------+-----------+-----------+----------
+  9 | finance     | 120000.00 |         1 |         3
+  3 | finance     |  90000.00 |         2 |         3
+  7 | finance     |  80000.00 |         3 |         3
+  2 | ops         | 150000.00 |         1 |         4
+  5 | ops         | 110000.00 |         2 |         4
+ 11 | ops         | 110000.00 |         2 |         4
+  1 | ops         |  70000.00 |         4 |         4
+```
+
+Two things to notice: the numbering restarts at 1 for each department, and
+after the shared 2 the next value is 4, not 3.
+
+Columns, in this order: `id`, `name`, `department`, `salary`, `dept_rank`
+(rank within the department by salary descending, ties shared), `dept_size`
+(headcount of that department).
+
+**Ordered by `department` ascending, then `dept_rank` ascending, then `id`
+ascending.** (500 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n ex2
+```
+@@@FILE ex2/hints.md
+## Hint 1
+
+Both new columns are computed over "the rows that share this person's
+department". One of them also cares about the order within that group; the
+other does not.
+
+## Hint 2
+
+The two windows differ by one clause:
+
+```sql
+rank()   OVER (PARTITION BY category ORDER BY price DESC) -- position in category
+count(*) OVER (PARTITION BY category)                     -- size of category
+```
+
+Adding an `ORDER BY` to the second one would turn a headcount into a
+running count — which is a different report.
+
+## Hint 3
+
+`rank()` never needs a tie-break in its window, because tied rows are meant
+to share a number. Your statement-level `ORDER BY` does need one, though:
+without `, id` at the end, the two people sharing rank 2 come back in an
+arbitrary order. That is the decision this exercise leaves you: the window's
+ordering and the output's ordering are different clauses solving different
+problems.
+@@@FILE ex2/importantHints.md
+## Hint 1
+
+Sanity-check the shape before the values. The query must return 500 rows —
+one per person, not one per department. If yours returns 5, you reached for
+`GROUP BY`; grouping collapses, and this report needs every individual row
+annotated.
+
+## Hint 2
+
+Diagnose this variant, which runs and is wrong:
+
+```sql
+rank() OVER (ORDER BY salary DESC)
+```
+
+The 138th-best-paid person in sales gets a company-wide number in the
+hundreds. Every department except the top one looks broken. One clause is
+missing, and it is the first of the three decisions in an `OVER`.
+
+## Hint 3
+
+Now the subtler variant. Suppose you write `dense_rank()` instead of
+`rank()`. The output still looks sensible — numbers ascending, restarting
+per department — but after a tie it continues at 3 rather than 4, so two
+people on identical salaries no longer "use up" a position. The prompt's
+illustration says which behaviour is wanted; read the row after the tie.
+@@@FILE ex2/solution.sql
+-- v3a02_ranking_top_n / ex2 — pay position within each department.
+SELECT id,
+       name,
+       department,
+       salary,
+       rank()   OVER (PARTITION BY department ORDER BY salary DESC) AS dept_rank,
+       count(*) OVER (PARTITION BY department)                      AS dept_size
+FROM staff
+ORDER BY department, dept_rank, id;
+@@@FILE ex2/expected.sql
+SELECT s.id,
+       s.name,
+       s.department,
+       s.salary,
+       (SELECT count(*) + 1
+          FROM staff x
+         WHERE x.department = s.department
+           AND x.salary > s.salary) AS dept_rank,
+       (SELECT count(*)
+          FROM staff y
+         WHERE y.department = s.department) AS dept_size
+FROM staff s
+ORDER BY s.department, dept_rank, s.id;
+@@@FILE ex3/prompt.md
+## Exercise 3 — the canonical top-N
+
+Edit `ex3/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)` — 500 rows, five departments.
+
+The board wants the three highest-paid people in each department: exactly
+three per department, fifteen rows in total, no more and no fewer. Ties are
+broken by the lower `id` winning, and that tie-break must be inside the
+window so the answer is reproducible.
+
+Illustration for one department:
+
+```
+ department | dept_rank | id | name        | salary
+------------+-----------+----+-------------+-----------
+ finance    |         1 | 12 | Ana Duarte  | 190000.00
+ finance    |         2 |  4 | Rob Chen    | 175000.00
+ finance    |         3 | 31 | Mia Okafor  | 175000.00
+```
+
+Rows 2 and 3 have identical salaries; `id` 4 beats `id` 31, so it takes
+second place. A fourth person also on 175000.00 would **not** appear —
+exactly three rows per department is the requirement.
+
+Note that you cannot filter on a window function in the same `SELECT` that
+computes it. `WHERE dept_rank <= 3` alongside the `row_number()` call is a
+syntax error; the ranking has to happen one query level down.
+
+Columns, in this order: `department`, `dept_rank`, `id`, `name`, `salary`.
+
+**Ordered by `department` ascending, then `dept_rank` ascending.**
+(15 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n ex3
+```
+@@@FILE ex3/hints.md
+## Hint 1
+
+You need a number that does not exist yet at the time `WHERE` runs. So build
+the numbered rows first, in their own query level, and filter the result of
+that.
+
+## Hint 2
+
+The two-level shape, on a different table:
+
+```sql
+WITH ranked AS (
+    SELECT category, id, name, price,
+           row_number() OVER (PARTITION BY category
+                              ORDER BY price DESC, id) AS rn
+    FROM products
+)
+SELECT category, rn, id, name, price
+FROM ranked
+WHERE rn <= 2
+ORDER BY category, rn;
+```
+
+A CTE and a subquery are interchangeable here; pick whichever you find
+readable.
+
+## Hint 3
+
+"Exactly three" is the specification that chooses your function.
+`row_number` guarantees three; `rank` would keep everybody tied for third
+and can return four or more. The decision left to you is the tie-break
+column — put it in the window's `ORDER BY`, not only in the final one, or
+the *membership* of the top three (not just its display order) becomes
+arbitrary.
+@@@FILE ex3/importantHints.md
+## Hint 1
+
+Start by counting rows. Five departments, three each: 15. If your result has
+3 rows, you forgot `PARTITION BY` and ranked the whole company. If it has
+more than 15, you used `rank` or `dense_rank` and ties are leaking in. The
+row count diagnoses the bug before you read a single name.
+
+## Hint 2
+
+Try the illegal version deliberately:
+
+```sql
+SELECT department, id, name, salary,
+       row_number() OVER (PARTITION BY department ORDER BY salary DESC, id) AS dept_rank
+FROM staff
+WHERE row_number() OVER (PARTITION BY department ORDER BY salary DESC, id) <= 3;
+```
+
+PostgreSQL answers: `window functions are not allowed in WHERE`. The reason
+is evaluation order — `WHERE` runs before windowing, so the value does not
+exist yet. Every top-N query in the world is two levels deep because of that
+sentence.
+
+## Hint 3
+
+There is a second correct shape worth knowing, and it is not a window at
+all: a `LATERAL` subquery per department, each with its own `ORDER BY
+salary DESC, id LIMIT 3`. It returns the same fifteen rows. Exercise 7 makes
+you write it; for now, notice that "top N per group" has two idioms and you
+are learning the general one first.
+@@@FILE ex3/solution.sql
+-- v3a02_ranking_top_n / ex3 — exactly three highest paid per department.
+WITH ranked AS (
+    SELECT department,
+           id,
+           name,
+           salary,
+           row_number() OVER (PARTITION BY department
+                              ORDER BY salary DESC, id) AS dept_rank
+    FROM staff
+)
+SELECT department,
+       dept_rank,
+       id,
+       name,
+       salary
+FROM ranked
+WHERE dept_rank <= 3
+ORDER BY department, dept_rank;
+@@@FILE ex3/expected.sql
+SELECT d.department,
+       p.dept_rank,
+       p.id,
+       p.name,
+       p.salary
+FROM (SELECT DISTINCT department FROM staff) d
+CROSS JOIN LATERAL (
+    SELECT s.id,
+           s.name,
+           s.salary,
+           row_number() OVER (ORDER BY s.salary DESC, s.id) AS dept_rank
+    FROM staff s
+    WHERE s.department = d.department
+    ORDER BY s.salary DESC, s.id
+    LIMIT 3
+) p
+ORDER BY d.department, p.dept_rank;
+@@@FILE ex4/prompt.md
+## Exercise 4 — keeping the ties
+
+Edit `ex4/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)` — 1,000,000 rows over 10,000 products, so roughly a
+hundred reviews each. Restrict to `product_id <= 100`.
+
+Merchandising wants the most-reviewed products in that range — "the top
+three, and if anything ties for third, keep it too". Review counts are small
+integers over a hundred products, so ties are not hypothetical: expect the
+result to contain more than three rows.
+
+Illustration where two products tie for second and three tie for third:
+
+```
+ product_id | review_count | rnk
+------------+--------------+-----
+         17 |          128 |   1
+          4 |          119 |   2
+         62 |          119 |   2
+          9 |          115 |   4
+         41 |          115 |   4
+         88 |          115 |   4
+```
+
+Six rows for a "top three" — because rank 2 is shared by two products and
+rank 4 by three, and the cut is on the *rank value*, not the row count. Note
+that rank 3 does not exist: `rank` skips after a tie.
+
+Columns, in this order: `product_id`, `review_count`, `rnk` (the rank by
+review count descending, ties shared). Keep every row whose `rnk` is 3 or
+less.
+
+**Ordered by `rnk` ascending, then `product_id` ascending.**
+
+```
+uv run dojo test v3a02_ranking_top_n ex4
+```
+@@@FILE ex4/hints.md
+## Hint 1
+
+Three stages, and it helps to name them: count the reviews per product,
+rank the counts, keep the small ranks. Each stage is a query level.
+
+## Hint 2
+
+The filter is on the rank, so the ranking must already exist:
+
+```sql
+WITH counts AS (
+    SELECT category, count(*) AS n FROM products GROUP BY category
+),
+ranked AS (
+    SELECT category, n, rank() OVER (ORDER BY n DESC) AS rnk FROM counts
+)
+SELECT * FROM ranked WHERE rnk <= 2;
+```
+
+Chained CTEs read top to bottom; each may refer to the ones above it.
+
+## Hint 3
+
+The choice of ranking function is the exercise. `row_number() <= 3` would
+return exactly three rows and silently discard products tied with the third.
+The prompt wants them kept, which selects one specific function — and note
+that with that function your result's row count is data-dependent, so do not
+assert three rows anywhere.
+@@@FILE ex4/importantHints.md
+## Hint 1
+
+Imagine the requirement being handed to you verbally: "give me the top
+three". Ask the follow-up out loud — "and if four products tie for third?"
+The three possible answers map exactly onto `row_number`, `rank` and
+`dense_rank`. This prompt has answered it for you; find the sentence that
+does.
+
+## Hint 2
+
+Watch what `dense_rank() <= 3` would do here instead. It keeps the top three
+distinct *counts*, which on this data could be a dozen products, because
+many products share counts. It is not wrong — it is the answer to "the top
+three levels", a question nobody asked. Predict the difference before you
+run either.
+
+## Hint 3
+
+One practical note on scale: the filter `product_id <= 100` belongs inside
+the counting stage, not outside the ranking one. Put it in the outer query
+and you rank all ten thousand products and then throw away 99% of them —
+same answer, a hundred times the work. Predicates that can run before the
+window should.
+@@@FILE ex4/solution.sql
+-- v3a02_ranking_top_n / ex4 — top three review counts, ties kept.
+WITH counts AS (
+    SELECT product_id,
+           count(*) AS review_count
+    FROM reviews
+    WHERE product_id <= 100
+    GROUP BY product_id
+),
+ranked AS (
+    SELECT product_id,
+           review_count,
+           rank() OVER (ORDER BY review_count DESC) AS rnk
+    FROM counts
+)
+SELECT product_id,
+       review_count,
+       rnk
+FROM ranked
+WHERE rnk <= 3
+ORDER BY rnk, product_id;
+@@@FILE ex4/expected.sql
+WITH counts AS (
+    SELECT product_id,
+           count(*) AS review_count
+    FROM reviews
+    WHERE product_id <= 100
+    GROUP BY product_id
+)
+SELECT c.product_id,
+       c.review_count,
+       (SELECT count(*) + 1
+          FROM counts x
+         WHERE x.review_count > c.review_count) AS rnk
+FROM counts c
+WHERE (SELECT count(*)
+         FROM counts y
+        WHERE y.review_count > c.review_count) < 3
+ORDER BY rnk, c.product_id;

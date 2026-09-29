@@ -1,1 +1,0 @@
-REFRESH MATERIALIZED VIEW category_rev;

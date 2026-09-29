@@ -1,0 +1,672 @@
+@@@META
+{
+  "slug": "v3a05_gaps_and_islands",
+  "title": "V3·A5 — Gaps and islands",
+  "summary": "Runs of consecutive things, and the holes between them: missing ids, unbroken streaks of days, sessions cut by inactivity, stretches where a value stayed the same. One arithmetic trick — value minus row number is constant inside a run — solves most of it, and the rest is choosing what \"consecutive\" means."
+}
+@@@FILE briefing.md
+# V3·A5 — Gaps and islands
+
+"How many days in a row did this customer visit?" "Which invoice numbers are
+missing?" "Group these clicks into sessions." "How long did the outage
+last?" These sound like four problems. They are one problem, and it has a
+name that has stuck since the 1990s: *gaps and islands*. The islands are the
+runs of consecutive things; the gaps are the holes between them.
+
+SQL has no built-in operator for either, and it does not need one, because
+window functions supply the two ingredients: `lag`/`lead` to see a
+neighbour, and `row_number` to count positions. Combine them and you can
+express "consecutive" — which SQL, being a language about sets, otherwise
+has no vocabulary for at all.
+
+This sector assumes sector v3a04_lag_lead_periods (neighbours) and
+v3a02_ranking_top_n (`row_number`). It uses cumulative sums from
+v3a03_running_totals as a *tool* rather than a subject.
+
+## Gaps first, because they are easier
+
+If a series has one row per value, a gap is a pair of adjacent rows whose
+values differ by more than one:
+
+```sql
+SELECT cid + 1                AS gap_start,
+       next_cid - 1           AS gap_end,
+       next_cid - cid - 1     AS missing
+FROM (
+    SELECT cid, lead(cid) OVER (ORDER BY cid) AS next_cid
+    FROM present
+) t
+WHERE next_cid - cid > 1;
+```
+
+Two details worth stating. The gap is reported as a half-open thought made
+closed — `cid + 1` through `next_cid - 1` — because the missing values are
+strictly between the two present ones. And this finds gaps *between* present
+values only: if the sequence is supposed to start at 1 and the smallest
+present value is 7, that leading hole has no adjacent pair and will not
+appear. Bounding the search is a separate decision, usually made with a
+`generate_series` spine.
+
+## The islands trick
+
+Here is the whole thing, on eight integers:
+
+```
+ value | row_number | value - row_number
+-------+------------+-------------------
+     3 |          1 |                  2
+     4 |          2 |                  2
+     5 |          3 |                  2
+     9 |          4 |                  5
+    10 |          5 |                  5
+    14 |          6 |                  8
+    15 |          7 |                  8
+    16 |          8 |                  8
+```
+
+Inside a run, the value increases by exactly one per row and so does the row
+number, so their difference does not change. The moment the value jumps, the
+difference jumps with it. That difference is therefore a **group key**: it
+has no meaning of its own, it is never displayed, and every row of one
+island shares it.
+
+```sql
+SELECT min(value) AS run_start, max(value) AS run_end, count(*) AS run_length
+FROM (SELECT value, value - row_number() OVER (ORDER BY value) AS grp
+      FROM present)
+GROUP BY grp
+ORDER BY run_start;
+```
+
+Once you have written it three times it stops looking clever and starts
+looking obvious, which is the goal.
+
+For **dates**, the arithmetic is the same because PostgreSQL lets you
+subtract an integer number of days from a date:
+
+```sql
+day - (row_number() OVER (ORDER BY day))::int AS grp
+```
+
+`row_number` returns `bigint`, and `date - bigint` has no operator, so the
+cast is not optional. For **months**, subtract an interval instead:
+`month - (row_number() OVER (ORDER BY month) * INTERVAL '1 month')`.
+
+Per group, partition the `row_number`:
+
+```sql
+day - (row_number() OVER (PARTITION BY product_id ORDER BY day))::int
+```
+
+and then group by `product_id` together with the key, because two products
+can easily produce the same difference by coincidence.
+
+## When "consecutive" is not consecutive
+
+The row-number trick needs a step size. Sessions do not have one: two clicks
+belong together if they are less than thirty minutes apart, whatever the
+exact interval. The general construction is a flag and a running sum:
+
+```sql
+WITH flagged AS (
+    SELECT customer_id, ts,
+           CASE WHEN ts - lag(ts) OVER w > INTERVAL '30 minutes'
+                  OR lag(ts) OVER w IS NULL
+                THEN 1 ELSE 0 END AS new_session
+    FROM events
+    WINDOW w AS (PARTITION BY customer_id ORDER BY ts)
+)
+SELECT customer_id, ts,
+       sum(new_session) OVER (PARTITION BY customer_id ORDER BY ts) AS session_no
+FROM flagged;
+```
+
+Read it as: mark the first row of each run with a 1, then let a running sum
+turn those marks into a group number. It handles any boundary rule you can
+express as a predicate — an inactivity threshold, a change of value, a
+status transition, a flag in the data. The row-number trick is the special
+case where the rule is "the value went up by exactly one".
+
+The third variant is the **dual row number**, for runs where a *value* stays
+the same:
+
+```sql
+row_number() OVER (ORDER BY ts)
+  - row_number() OVER (PARTITION BY rating ORDER BY ts) AS grp
+```
+
+Both counters advance together while the rating stays the same, so their
+difference is constant inside a run of equal ratings and changes when the
+rating changes. Group by `rating` and that key.
+
+## Exercise 1 — the missing ids
+
+Customers below 500 who have never ordered, reported as contiguous ranges
+rather than one row each.
+
+## Exercise 2 — the islands trick, on integers
+
+The same list read the other way round: the unbroken runs of customers who
+did order.
+
+## Exercise 3 — runs of days
+
+The days on which a product was reviewed, collapsed into consecutive-day
+streaks.
+
+## Exercise 4 — one island series per group
+
+The same streaks, computed independently for three products in one query.
+
+## Exercise 5 — runs of a condition
+
+Consecutive months in which a status's revenue rose — where "consecutive"
+applies to a computed flag rather than to the values themselves.
+
+## Exercise 6 — the longest streak per entity
+
+Each product's best run, chosen from all its runs.
+
+## Exercise 7 — sessions
+
+Clickstream events grouped into sessions by a twelve-hour inactivity
+threshold, with the flag-and-running-sum construction.
+
+## Exercise 8 — runs of an unchanged value
+
+Stretches of consecutive reviews that all gave the same rating, using two
+row numbers instead of one.
+
+## Challenge — session summaries
+
+The sessions from exercise 7, collapsed to one row each, with their span and
+event count, filtered to the substantial ones.
+
+## Spaced review
+
+`review1/`: the three longest quiet periods between finance hires — gap
+detection, ranked.
+@@@FILE explanation.md
+# Reading - sql/v3a05_gaps_and_islands
+
+Every query in this sector is the same shape: derive a group key that is
+constant inside a run, then aggregate by it. The variations are entirely
+about how the key is derived.
+
+## Notes
+
+**A gap is a property of a pair; an island is a property of a group.** That
+is why gaps fall out of `lag`/`lead` directly, and islands need an
+intermediate key before any aggregate can run. If you find yourself trying
+to write islands with `lead` alone, this is the sentence that unsticks you.
+
+**`value - row_number()` is constant inside a consecutive run.** Both sides
+increase by one per row while the run continues; the difference only moves
+when the value skips. The key is meaningless in itself — do not display it,
+do not order by it, and do not be alarmed that it is negative.
+
+**Types matter in the arithmetic.** `row_number()` is `bigint`. `date -
+bigint` is not an operator, so date islands need `(row_number() OVER
+(...))::int`. Month islands need an interval multiplication instead, because
+months are not a fixed number of days. Integer islands need no cast at all.
+
+**Partition the counter *and* group by the partition column.** With
+`PARTITION BY product_id` on the `row_number`, two different products can
+still produce the same difference by coincidence. `GROUP BY product_id, grp`
+is the fix, and forgetting it merges unrelated runs into one.
+
+**The general form is a flag plus a running sum.** Mark the first row of
+each run with 1, sum those marks cumulatively, and the sum is the run
+number. This handles thresholds, value changes, and any rule you can write
+as a boolean — the row-number trick is just the case where the rule is
+"increased by exactly one".
+
+**The dual row number handles runs of an unchanged value.** Two counters,
+one global and one partitioned by the value, advance together while the
+value holds and diverge when it changes. Group by the value and the
+difference.
+
+**Boundaries are not gaps.** `lead`-based gap detection finds holes between
+present values. A missing prefix or suffix has no adjacent pair, so it needs
+an explicit range — usually a `generate_series` spine — to be visible at
+all.
+
+**Window functions cannot be filtered in `WHERE`.** Every one of these
+queries is at least two levels deep for that reason, and often three:
+derive, group, filter.
+
+**Reduce to the grain of the question before numbering.** Two reviews on the
+same day are one day. If you number the raw rows instead of the distinct
+days, the duplicate gets its own row number, the difference moves, and a
+single day splits into two "runs". Almost every wrong islands query has this
+mistake at the bottom of it.
+
+**A run of one is still a run.** An isolated value produces a row where
+start and end are equal and the length is 1. That is correct, and reports
+that suppress them should say so with an explicit `HAVING`, not by accident.
+
+**`HAVING`, not `WHERE`, for run length.** The length is a property of the
+group and does not exist until after grouping — the same rule that governs
+every `GROUP BY` query, arriving in a place where it is easy to forget.
+
+**Two windows with the same specification cost one sort.** The
+flag-and-running-sum construction looks more expensive than the row-number
+trick and is not: both of its windows share `PARTITION BY ... ORDER BY ...`,
+so the planner sorts once and stacks two `WindowAgg` nodes. Ordering them
+differently by accident is what actually costs you.
+
+**Check `end - start + 1 = length`.** On correct runs those two numbers are
+always equal. When they diverge, two entities' runs have been merged by a
+group key collision — the classic symptom of `GROUP BY grp` without the
+partition column.
+
+## ex1 — the missing ids
+
+`lead` over the present values, keep the pairs more than one apart, and
+report the interval between them. The arithmetic `next - cid - 1` is the
+count of missing values, and getting the minus-one right is the exercise.
+
+## ex2 — the islands trick, on integers
+
+Same input, opposite question. Note that gaps and islands are duals: the
+islands are exactly what is left between the gaps, and either can be derived
+from the other.
+
+## ex3 — runs of days
+
+The first appearance of the `::int` cast. If PostgreSQL tells you `operator
+does not exist: date - bigint`, this is the sentence you needed.
+
+## ex4 — one island series per group
+
+Two changes from ex3, and the second one is easy to miss: partition the
+`row_number` *and* group by the product id.
+
+## ex5 — runs of a condition
+
+The values are months and the rule is "revenue rose", so the island is over
+a filtered subset rather than over the original series. Filtering first is
+what makes the row-number trick apply again.
+
+## ex6 — the longest streak per entity
+
+Two stages of aggregation: rows to runs, then runs to the best run. The
+second stage is a top-N per group, which is sector v3a02_ranking_top_n's
+shape reappearing.
+
+## ex7 — sessions
+
+The general construction. The `OR lag(...) IS NULL` in the flag is what
+gives the first event of each customer a 1, so session numbers start at 1
+rather than 0.
+
+## ex8 — runs of an unchanged value
+
+Two row numbers. Write out the two counters on paper for six rows before
+trusting it; the trick is only obvious after you have watched it work once.
+
+## challenge — session summaries
+
+Sessionise, aggregate per session, filter the result. Three levels, each
+doing one thing.
+
+## review1 — the longest quiet periods
+
+Gap detection plus an ordering. The tie-break matters: two gaps of identical
+length need a deterministic order or the top three is not defined.
+
+## Further reading
+
+- [Window Functions](https://www.postgresql.org/docs/16/functions-window.html) — `row_number`, `lag`, `lead`, and the note that they ignore the frame clause.
+- [Date/Time Functions and Operators](https://www.postgresql.org/docs/16/functions-datetime.html) — the operator table showing `date - integer` returning a date, and `date - date` returning an integer.
+- [Aggregate Functions](https://www.postgresql.org/docs/16/functions-aggregate.html) — `min`, `max` and `count` over a derived group key, which is the second half of every islands query.
+- [WITH Queries](https://www.postgresql.org/docs/16/queries-with.html) — chained CTEs, the natural way to write a three-stage derivation.
+- [Set Returning Functions](https://www.postgresql.org/docs/16/functions-srf.html) — `generate_series`, for bounding a gap search at the ends of a range.
+@@@FILE fullReadme.md
+# V3·A5 — Gaps and islands
+
+Consecutiveness is not a set-theoretic idea, so SQL has no operator for it.
+Window functions let you build one.
+
+## Concept
+
+### Gaps
+
+```sql
+WITH present AS (SELECT DISTINCT customer_id AS cid FROM orders WHERE customer_id <= 500),
+     paired  AS (SELECT cid, lead(cid) OVER (ORDER BY cid) AS next_cid FROM present)
+SELECT cid + 1            AS gap_start,
+       next_cid - 1       AS gap_end,
+       next_cid - cid - 1 AS missing
+FROM paired
+WHERE next_cid - cid > 1
+ORDER BY gap_start;
+```
+
+### Islands, by row-number difference
+
+```sql
+WITH present AS (...),
+     keyed AS (SELECT cid, cid - row_number() OVER (ORDER BY cid) AS grp FROM present)
+SELECT min(cid) AS run_start, max(cid) AS run_end, count(*) AS run_length
+FROM keyed
+GROUP BY grp
+ORDER BY run_start;
+```
+
+### Islands over dates
+
+```sql
+day - (row_number() OVER (ORDER BY day))::int AS grp
+```
+
+The cast is required: `row_number` is `bigint` and there is no `date -
+bigint` operator. Over months, multiply an interval instead:
+
+```sql
+month - (row_number() OVER (ORDER BY month) * INTERVAL '1 month') AS grp
+```
+
+### Islands per group
+
+```sql
+day - (row_number() OVER (PARTITION BY product_id ORDER BY day))::int AS grp
+...
+GROUP BY product_id, grp
+```
+
+Both halves are needed. The partition restarts the counter; the `GROUP BY`
+stops two products with the same difference from being merged.
+
+### The general construction: flag plus running sum
+
+```sql
+WITH flagged AS (
+    SELECT customer_id, ts,
+           CASE WHEN lag(ts) OVER w IS NULL
+                  OR ts - lag(ts) OVER w > INTERVAL '30 minutes'
+                THEN 1 ELSE 0 END AS new_run
+    FROM events
+    WINDOW w AS (PARTITION BY customer_id ORDER BY ts)
+),
+numbered AS (
+    SELECT customer_id, ts,
+           sum(new_run) OVER (PARTITION BY customer_id ORDER BY ts) AS run_no
+    FROM flagged
+)
+SELECT customer_id, run_no, min(ts) AS started, max(ts) AS ended, count(*) AS events
+FROM numbered
+GROUP BY customer_id, run_no
+ORDER BY customer_id, run_no;
+```
+
+This handles any boundary rule expressible as a predicate. The row-number
+trick is the special case of "the value increased by exactly one".
+
+### The dual row number, for runs of an unchanged value
+
+```sql
+row_number() OVER (ORDER BY ts)
+  - row_number() OVER (PARTITION BY rating ORDER BY ts) AS grp
+...
+GROUP BY rating, grp
+```
+
+## Worked example — watching the dual row number work
+
+Six reviews, ratings in time order:
+
+```
+ ts | rating | rn_all | rn_by_rating | grp
+----+--------+--------+--------------+-----
+  1 |      5 |      1 |            1 |   0
+  2 |      5 |      2 |            2 |   0
+  3 |      3 |      3 |            1 |   2
+  4 |      5 |      4 |            3 |   1
+  5 |      5 |      5 |            4 |   1
+  6 |      3 |      6 |            2 |   4
+```
+
+The two 5s at the start share `grp = 0`; the two 5s in the middle share
+`grp = 1`. They are different runs of the same rating, and the key separates
+them correctly. Note that `grp` alone is not enough — rating 3 at ts 3 has
+`grp = 2` and no other row shares it here, but on a longer series a 3 and a
+5 could collide. `GROUP BY rating, grp` is what makes it sound.
+
+## Worked example — three techniques, one answer
+
+The same streak report, written three ways, so you can see what each
+technique costs and when it stops applying.
+
+**Row-number difference** — shortest, assumes a step of exactly one day:
+
+```sql
+SELECT min(day) AS start_day, max(day) AS end_day, count(*) AS days
+FROM (SELECT day, day - (row_number() OVER (ORDER BY day))::int AS grp
+      FROM days) k
+GROUP BY grp ORDER BY start_day;
+```
+
+**Flag and running sum** — one more window, no step assumption:
+
+```sql
+SELECT min(day) AS start_day, max(day) AS end_day, count(*) AS days
+FROM (SELECT day,
+             sum(CASE WHEN lag(day) OVER (ORDER BY day) IS NULL
+                        OR day - lag(day) OVER (ORDER BY day) > 1
+                      THEN 1 ELSE 0 END) OVER (ORDER BY day) AS run_no
+      FROM days) n
+GROUP BY run_no ORDER BY start_day;
+```
+
+**Boundary subqueries** — no windows at all, and the version you will find
+in code written before 2009:
+
+```sql
+SELECT s.day AS start_day,
+       (SELECT min(e.day) FROM days e
+         WHERE e.day >= s.day
+           AND NOT EXISTS (SELECT 1 FROM days q WHERE q.day = e.day + 1)) AS end_day
+FROM days s
+WHERE NOT EXISTS (SELECT 1 FROM days p WHERE p.day = s.day - 1)
+ORDER BY start_day;
+```
+
+The third is the only one that is genuinely slower — a correlated subquery
+per run start — and it is worth reading once, because recognising it in
+legacy code tells you immediately what the query was for.
+
+## Common mistakes
+
+- **Grouping by `grp` alone in a partitioned islands query.** Two entities
+  can produce the same difference. Group by the entity too.
+- **`date - row_number()` without a cast.** `operator does not exist: date -
+  bigint`.
+- **Using the row-number trick when the step is not 1.** Every-other-day
+  data, or timestamps, or months-as-dates: the difference is not constant
+  and the runs come out as singletons.
+- **Forgetting the first row's flag.** `ts - lag(ts) > interval` is NULL on
+  the first row of a partition, so `CASE` falls to `ELSE 0` and the first
+  session gets number 0 while later ones start at 1. Add `OR lag(...) IS
+  NULL`.
+- **Reporting a gap without the ±1.** `lead(cid) - cid` is the *distance*;
+  the number of missing values is one less, and the range is `cid + 1`
+  through `next_cid - 1`.
+- **Expecting gap detection to find missing ends.** It cannot: a hole at the
+  start or end of the range has no adjacent pair.
+- **Filtering on a window result in `WHERE`.** Not allowed; add a level.
+- **Non-unique ordering.** If two rows tie on the window's `ORDER BY`, the
+  row numbers are assigned arbitrarily and the runs can differ between runs
+  of the query. Make the ordering total.
+
+## The interview answer
+
+> *Given a table of dates, find the longest run of consecutive days.*
+
+Order the distinct days and compute `day - row_number()::int` as a group
+key: inside a consecutive run both sides increase by one, so the difference
+is constant, and it changes exactly where the run breaks. Group by that key,
+take `min(day)`, `max(day)` and `count(*)` to get each run, then order by
+length and take the top one. If the definition of "consecutive" is not
+"exactly one day apart" — sessions with an inactivity threshold, for
+instance — I would switch to the general form: flag the first row of each
+run with `lag` and a comparison, then take a running `sum` of the flag as
+the run number. Same shape, more general rule.
+
+## Check yourself
+
+1. Why is `value - row_number()` constant inside a run?
+2. What is that key good for, and what must you never do with it?
+3. Why does the date version need `::int`?
+4. Write the month version.
+5. In a per-product islands query, why is `GROUP BY grp` wrong?
+6. Give the general flag-and-running-sum construction in five lines.
+7. Why does the flag need `OR lag(ts) IS NULL`?
+8. How many values are missing between 7 and 12?
+9. Why can gap detection not find a missing first value?
+10. How would you bound a gap search to the range 1..500?
+11. Explain the dual-row-number trick, and what you group by.
+12. What breaks if the window's `ORDER BY` has ties?
+13. Turn a list of runs into "the longest run per entity" — what shape is
+    that, and which sector did you learn it in?
+14. Give two questions from your own work that are secretly gaps-and-islands
+    problems.
+@@@FILE fullReading.md
+# Reading - sql/v3a05_gaps_and_islands
+
+The phrase "gaps and islands" comes from the SQL Server community in the
+early 2000s — Itzik Ben-Gan's writing popularised it — but the problem is
+much older, and so is the trick. Anyone who has written a report over a
+sorted tape has independently discovered that subtracting a sequence number
+from a value cancels out the parts that move together.
+
+## Why SQL needs a trick at all
+
+Relational algebra has no notion of adjacency. A table is a set; sets have
+no order; "the next row" is not a concept the algebra can express. Every
+mechanism for talking about order — `ORDER BY`, `LIMIT`, window functions —
+is bolted onto the outside of the algebra, and window functions are the only
+one of the three that lets order participate in a *computation* rather than
+just in presentation.
+
+That is why gaps and islands is not a beginner problem despite sounding like
+one. "Group consecutive rows" requires you to first manufacture something
+that is constant across the group, because `GROUP BY` can only group by
+values it can see. The whole art is the manufacture.
+
+There are exactly three manufacturing techniques in wide use, and this
+sector teaches all three.
+
+The **difference trick** — value minus row number — works when the step
+between consecutive values is a known constant. It is the cheapest: one
+window function, one arithmetic expression, one `GROUP BY`. It is also the
+most fragile, because it silently produces singleton runs when the step
+assumption is wrong. A series of every-other-day observations, or timestamps
+rather than dates, or months stored as the first of the month and compared
+with day arithmetic, all break it without any error message.
+
+The **flag-and-cumulative-sum** — mark run starts, then sum the marks — works
+for any rule you can write as a predicate over a row and its predecessor. It
+costs two window functions and reads more like the requirement. It is what
+you should reach for whenever "consecutive" means something other than "plus
+one", and it is the only one of the three that generalises to rules
+involving more than one column.
+
+The **dual row number** handles runs of an unchanged value, which the other
+two express awkwardly. It is the most opaque of the three and worth writing
+out on paper the first few times.
+
+## What the executor does
+
+An islands query is typically three plan levels: a `WindowAgg` to compute
+the key, a `Sort` or `HashAggregate` to group by it, and possibly another
+sort for presentation. On a series that has already been rolled up — a few
+hundred or a few thousand rows — the whole thing is free. On a raw event
+table it is a sort of everything, and that sort is the query's cost.
+
+The flag-and-sum version stacks two `WindowAgg` nodes, but only one `Sort`:
+both windows share `PARTITION BY customer_id ORDER BY ts`, so the planner
+sorts once and runs both nodes over the same ordering. This is worth knowing
+because it means the "more expensive-looking" general construction is
+usually not more expensive at all. Writing the two windows with *different*
+orderings — say one by `ts` and one by `id` — would force a second sort, and
+that is a real cost that hides in a formatting difference.
+
+There is one more executor detail relevant here. `sum(new_run) OVER
+(PARTITION BY ... ORDER BY ts)` is a cumulative frame, so it is computed
+incrementally and streams. Nothing in a well-written sessionisation query
+needs to buffer a whole partition, which is why these queries scale to event
+tables far better than their reputation suggests. The thing that does not
+scale is the sort, and the fix for that is an index on `(customer_id, ts)` —
+which this course's dataset deliberately does not have.
+
+## Sessionisation, and what the threshold means
+
+Web analytics conventionally defines a session as activity with no gap
+longer than thirty minutes. That number is arbitrary. It comes from
+Urchin/Google Analytics in the early 2000s and has survived because
+everybody uses it, which makes cross-tool comparisons possible and makes the
+metric itself a convention rather than a measurement.
+
+The important consequence for a query author: the threshold is a *parameter
+of the definition*, not a detail of the implementation. It should appear
+once, near the top, ideally as a named CTE value or a query parameter, and
+it should be stated in whatever documentation the report carries. A session
+count computed with a thirty-minute threshold and a session count computed
+with a twelve-hour threshold are different metrics with the same name, and
+comparing them is a category error that has caused more confusion in
+analytics teams than any SQL bug.
+
+There is a second definitional question that the flag construction makes
+easy to get wrong: is the boundary "gap greater than the threshold" or "gap
+greater than or equal to"? With second-resolution timestamps and a
+thirty-minute rule, an event exactly 1800 seconds after the previous one is
+either the last event of the old session or the first of the new one,
+depending on which comparison you wrote. It affects maybe one event in a
+million and it is the kind of thing that makes two implementations of the
+same metric disagree by 0.0001% forever.
+
+## Bounding the search
+
+Gap detection over adjacent pairs cannot see holes at the ends. If the
+question is "which invoice numbers between 1 and 500 are missing", the honest
+implementation joins against a generated range:
+
+```sql
+SELECT g AS missing
+FROM generate_series(1, 500) AS g
+WHERE NOT EXISTS (SELECT 1 FROM present p WHERE p.cid = g);
+```
+
+That version finds every hole including the ends, and it produces one row
+per missing value rather than one row per range. Collapsing those rows into
+ranges is — of course — an islands problem over the missing values, which is
+a satisfying place for this sector to close: gaps and islands are duals, and
+whichever one your data gives you, the other is one `row_number` away.
+
+The trade-off is size. `generate_series` over a bounded, dense integer range
+is fine; over "every second between two timestamps a year apart" it is
+thirty-one million rows, and the adjacent-pair approach is the only
+practical one. Choose based on how dense the domain is, not on which query
+you find prettier.
+
+## When not to use this
+
+**When a simple `count` answers the question.** "How many days did they
+visit" is a `count(DISTINCT day)`. Only reach for islands when the
+*consecutiveness* is part of the requirement.
+
+**When the runs should be maintained rather than derived.** If sessions are
+a first-class concept in the product — with ids that appear in other tables
+— they belong in a column written at ingest, not recomputed by every report
+with a slightly different threshold.
+
+**When the rule involves lookahead beyond one row.** "A run ends when there
+are three consecutive quiet days" is not expressible as a single-neighbour
+flag; it needs a wider frame or a recursive CTE, and at that point the
+readable answer may genuinely live outside SQL.
+
+**When the data is already grouped by something better.** If the source
+system stamps a batch id, an outage id or a visit id, use it. Deriving runs
+from timestamps when an authoritative grouping exists is reconstructing
+information you already have, with a threshold you invented.

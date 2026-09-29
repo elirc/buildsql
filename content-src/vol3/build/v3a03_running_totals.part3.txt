@@ -1,0 +1,907 @@
+@@@FILE ex5/prompt.md
+## Exercise 5 — rows are not days
+
+Edit `ex5/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)` — 1,000,000 rows over 10,000 products, so about a
+hundred reviews per product spread across a year. Restrict to `product_id =
+1` and roll up to one row per day.
+
+That series is **sparse**: product 1 gets a review on roughly a hundred days
+out of three hundred and sixty-five, so consecutive rows are often several
+days apart. This is where a positional frame and a calendar frame stop
+agreeing, and the exercise is to see them disagree.
+
+Three derived columns, all seven-wide, all over the same series:
+
+- `avg7_rows` — the mean of this row and the six rows before it, using
+  `ROWS`.
+- `avg7_days` — the mean over the calendar window `[day - 6 days, day]`,
+  using `RANGE BETWEEN INTERVAL '6 days' PRECEDING AND CURRENT ROW`.
+- `rows_in_7_days` — how many rows that calendar window actually contained.
+
+Illustration on a stretch with a gap in it:
+
+```
+    day     | reviews | avg7_rows | avg7_days | rows_in_7_days
+------------+---------+-----------+-----------+---------------
+ 2023-03-02 |       1 |      1.20 |      1.00 |              2
+ 2023-03-05 |       2 |      1.29 |      1.50 |              3
+ 2023-04-18 |       1 |      1.29 |      1.00 |              1
+ 2023-04-20 |       3 |      1.43 |      2.00 |              2
+```
+
+Row three is the point. Positionally it has six predecessors, so `avg7_rows`
+averages seven rows spanning six *weeks*. In calendar terms it is alone in
+its window, so `avg7_days` is its own value and `rows_in_7_days` is 1.
+
+A `RANGE` frame with an offset requires **exactly one** expression in the
+window's `ORDER BY`, and that expression must be of a type the offset can be
+subtracted from — a `date` and an `interval` here.
+
+Columns, in this order: `day` (a `date`), `reviews` (that day's count),
+`avg7_rows` (rounded to 2 decimals), `avg7_days` (rounded to 2 decimals),
+`rows_in_7_days`.
+
+**Ordered by `day` ascending.**
+
+```
+uv run dojo test v3a03_running_totals ex5
+```
+@@@FILE ex5/hints.md
+## Hint 1
+
+Two of the three columns look at seven of something. One counts rows, the
+other counts days. SQL has a different frame mode for each, and on this data
+they give different answers.
+
+## Hint 2
+
+The two spellings, side by side:
+
+```sql
+avg(x) OVER (ORDER BY d ROWS  BETWEEN 6 PRECEDING AND CURRENT ROW)
+avg(x) OVER (ORDER BY d RANGE BETWEEN INTERVAL '6 days' PRECEDING
+                                  AND CURRENT ROW)
+```
+
+`6 PRECEDING` in `ROWS` mode is six positions. `INTERVAL '6 days'
+PRECEDING` in `RANGE` mode is subtracted from the ordering column's value.
+
+## Hint 3
+
+Because `day` is unique in this rollup, the positional window may safely
+order by `day` alone — there are no ties to make `ROWS` ambiguous. The
+`RANGE` window has no choice: an offset frame permits exactly one ordering
+expression. The decision left to you is whether `rows_in_7_days` should
+count over the calendar frame or the positional one; the prompt says
+calendar, and the reason is that a count over the positional frame would be
+a much less interesting number.
+@@@FILE ex5/importantHints.md
+## Hint 1
+
+Before writing anything, predict what `rows_in_7_days` can be. Its minimum
+is 1 — the current row is always in its own frame. Its maximum is 7, because
+the series has at most one row per day and the window spans seven days. If
+your column ever prints 0 or 8, the frame is not what you think it is.
+
+## Hint 2
+
+Here is the bug in the wild, phrased as a bug report: "our seven-day average
+is smoother than the raw data even during weeks when nothing happened".
+That is `ROWS` reaching back across empty days to find seven rows. The
+column is not a seven-day average; it is a seven-observation average, which
+on an irregular series is a different statistic with the same name.
+
+## Hint 3
+
+If PostgreSQL rejects your `RANGE` window, read the message carefully. Two
+different errors are common: *"RANGE with offset PRECEDING/FOLLOWING
+requires exactly one ORDER BY column"* means you left a tie-break in there,
+and *"invalid preceding or following size"* means the offset's type does not
+match the ordering column's — an integer offset against a date, typically.
+Both are the same underlying rule: in `RANGE` mode the offset is arithmetic
+on the ordering value.
+@@@FILE ex5/solution.sql
+-- v3a03_running_totals / ex5 — positional and calendar windows over a sparse series.
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           count(*)                            AS reviews
+    FROM reviews
+    WHERE product_id = 1
+    GROUP BY 1
+)
+SELECT day,
+       reviews,
+       round(avg(reviews) OVER (ORDER BY day
+                                ROWS BETWEEN 6 PRECEDING
+                                         AND CURRENT ROW), 2) AS avg7_rows,
+       round(avg(reviews) OVER (ORDER BY day
+                                RANGE BETWEEN INTERVAL '6 days' PRECEDING
+                                          AND CURRENT ROW), 2) AS avg7_days,
+       count(*) OVER (ORDER BY day
+                      RANGE BETWEEN INTERVAL '6 days' PRECEDING
+                                AND CURRENT ROW)               AS rows_in_7_days
+FROM daily
+ORDER BY day;
+@@@FILE ex5/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           count(*)                            AS reviews
+    FROM reviews
+    WHERE product_id = 1
+    GROUP BY 1
+),
+numbered AS (
+    SELECT day, reviews, row_number() OVER (ORDER BY day) AS rn
+    FROM daily
+)
+SELECT d.day,
+       d.reviews,
+       (SELECT round(avg(a.reviews), 2)
+          FROM numbered a
+         WHERE a.rn BETWEEN d.rn - 6 AND d.rn)            AS avg7_rows,
+       (SELECT round(avg(b.reviews), 2)
+          FROM numbered b
+         WHERE b.day BETWEEN d.day - 6 AND d.day)         AS avg7_days,
+       (SELECT count(*)
+          FROM numbered c
+         WHERE c.day BETWEEN d.day - 6 AND d.day)         AS rows_in_7_days
+FROM numbered d
+ORDER BY d.day;
+@@@FILE ex6/prompt.md
+## Exercise 6 — the calendar spine
+
+Edit `ex6/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)`. Restrict to `product_id <= 3` and to June 2023
+(`created_at >= '2023-06-01' AND created_at < '2023-07-01'`).
+
+Three products get roughly twenty-five reviews between them in a month, so
+most days in June have none. A `GROUP BY` alone produces a series with holes
+in it; the report needs all thirty days, with `0` on the quiet ones, and a
+rolling seven-day sum that is only meaningful because the holes were filled
+first.
+
+Build the spine with `generate_series`, left-join the counts onto it, and
+window over the result.
+
+Illustration of the first six days, where the 2nd and 5th are quiet:
+
+```
+    day     | reviews | rolling7
+------------+---------+----------
+ 2023-06-01 |       2 |        2
+ 2023-06-02 |       0 |        2
+ 2023-06-03 |       1 |        3
+ 2023-06-04 |       3 |        6
+ 2023-06-05 |       0 |        6
+ 2023-06-06 |       1 |        7
+```
+
+Without the spine, 2023-06-02 and 2023-06-05 would simply be absent, the
+chart would draw a straight line across them, and `rolling7` would be a
+sum of seven *observations* spanning nine days.
+
+Two traps to plan for. After a left join, `count(*)` counts the NULL-padded
+row and reports 1 on every empty day — count something from the right-hand
+table instead, or `coalesce` a pre-aggregated count. And any filter on the
+right-hand table must live in the `ON` clause (or be applied before the
+join); a `WHERE r.product_id <= 3` after the join discards every empty day
+and undoes the whole exercise.
+
+Columns, in this order: `day` (a `date`, every day of June), `reviews` (that
+day's count, `0` where there were none), `rolling7` (the sum of `reviews`
+over this day and the six before it).
+
+**Ordered by `day` ascending.** (30 rows.)
+
+```
+uv run dojo test v3a03_running_totals ex6
+```
+@@@FILE ex6/hints.md
+## Hint 1
+
+Three stages. Manufacture the days. Attach the counts. Window the result.
+Only the middle stage has any subtlety in it.
+
+## Hint 2
+
+`generate_series` makes the spine:
+
+```sql
+SELECT d::date AS day
+FROM generate_series('2023-06-01'::date, '2023-06-30'::date,
+                     INTERVAL '1 day') AS d;
+```
+
+It returns timestamps, hence the cast. The end value is inclusive.
+
+## Hint 3
+
+You have two workable shapes for the middle stage. Either left-join the raw
+`reviews` rows onto the spine with the date predicate in the `ON` clause and
+`count(r.id)`, or aggregate the reviews to daily counts first and left-join
+those on `day = day`, wrapping the result in `coalesce(..., 0)`. The second
+scans `reviews` once; the first scans it per day. The decision left to you
+is which one you would ship — and on this dataset, with no index on
+`created_at`, the difference is real.
+@@@FILE ex6/importantHints.md
+## Hint 1
+
+Verify the spine before you add anything to it. Run just the
+`generate_series` query. It must return 30 rows, the first `2023-06-01` and
+the last `2023-06-30`. Everything downstream inherits that shape, so get it
+right in isolation.
+
+## Hint 2
+
+Now the failure worth experiencing on purpose. Write the join, then count
+with `count(*)`:
+
+```
+    day     | reviews
+------------+---------
+ 2023-06-01 |       2
+ 2023-06-02 |       1     <- there were none
+ 2023-06-03 |       1
+```
+
+Every empty day reports one review — the NULL-padded row that the left join
+manufactured. `count(*)` counts rows; `count(r.id)` counts non-NULL values.
+This is the same distinction as `count(*)` versus `count(col)` in an
+ordinary outer join, and it is worth more than it costs to remember.
+
+## Hint 3
+
+The second failure is even quieter. Add `WHERE r.product_id <= 3` after the
+join and the row count drops from 30 to about 20: on an empty day
+`r.product_id` is NULL, `NULL <= 3` is unknown, and the row is filtered out.
+The left join has been silently converted to an inner one. The rule to carry
+away: a predicate on the *inner* side of an outer join belongs in `ON`, not
+in `WHERE`, unless you deliberately want it to undo the outer join.
+@@@FILE ex6/solution.sql
+-- v3a03_running_totals / ex6 — a calendar spine, then a rolling seven-day sum.
+WITH days AS (
+    SELECT d::date AS day
+    FROM generate_series('2023-06-01'::date,
+                         '2023-06-30'::date,
+                         INTERVAL '1 day') AS d
+),
+counted AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           count(*)                            AS reviews
+    FROM reviews
+    WHERE product_id <= 3
+      AND created_at >= '2023-06-01'
+      AND created_at <  '2023-07-01'
+    GROUP BY 1
+),
+filled AS (
+    SELECT d.day,
+           coalesce(c.reviews, 0) AS reviews
+    FROM days d
+    LEFT JOIN counted c ON c.day = d.day
+)
+SELECT day,
+       reviews,
+       sum(reviews) OVER (ORDER BY day
+                          ROWS BETWEEN 6 PRECEDING
+                                   AND CURRENT ROW) AS rolling7
+FROM filled
+ORDER BY day;
+@@@FILE ex6/expected.sql
+WITH days AS (
+    SELECT d::date AS day
+    FROM generate_series('2023-06-01'::date,
+                         '2023-06-30'::date,
+                         INTERVAL '1 day') AS d
+),
+june AS (
+    SELECT id, created_at
+    FROM reviews
+    WHERE product_id <= 3
+      AND created_at >= '2023-06-01'
+      AND created_at <  '2023-07-01'
+),
+counted AS (
+    SELECT d.day,
+           count(j.id) AS reviews
+    FROM days d
+    LEFT JOIN june j ON j.created_at >= d.day
+                    AND j.created_at <  d.day + 1
+    GROUP BY d.day
+)
+SELECT c.day,
+       c.reviews,
+       (SELECT sum(x.reviews)
+          FROM counted x
+         WHERE x.day BETWEEN c.day - 6 AND c.day) AS rolling7
+FROM counted c
+ORDER BY c.day;
+@@@FILE ex7/prompt.md
+## Exercise 7 — the cumulative share curve
+
+Edit `ex7/solution.sql`.
+
+Works against `customers(id int, name text, email text, country text,
+created_at timestamptz)` — 50,000 rows across 12 countries. The largest are
+US 11,733, GB 6,025, DE 5,724, FR 2,985, CA 2,975.
+
+Marketing wants a concentration curve: countries biggest first, and for each
+one, what percentage of the entire customer base has been accounted for by
+the time you reach it. This is the shape that answers "how many countries do
+we need to cover 80% of our users".
+
+Illustration on four countries out of a base of 100:
+
+```
+ country | customers | cum_customers | cum_pct
+---------+-----------+---------------+--------
+ US      |        45 |            45 |   45.00
+ GB      |        30 |            75 |   75.00
+ DE      |        15 |            90 |   90.00
+ FR      |        10 |           100 |  100.00
+```
+
+The last row is `100.00` by construction. That is the check: if your final
+`cum_pct` is not exactly 100.00, the numerator and denominator are not
+covering the same population.
+
+Ties in `customers` are broken by `country` ascending, in the window and in
+the output, so the curve is defined.
+
+Columns, in this order: `country`, `customers` (that country's customer
+count), `cum_customers` (the running total, biggest country first),
+`cum_pct` (100 × `cum_customers` ÷ the full base, rounded to 2 decimals).
+
+**Ordered by `customers` descending, then `country` ascending.** (12 rows.)
+
+```
+uv run dojo test v3a03_running_totals ex7
+```
+@@@FILE ex7/hints.md
+## Hint 1
+
+The numerator moves down the column; the denominator does not. Two windows
+over the same rows, differing only in whether they have an `ORDER BY`.
+
+## Hint 2
+
+The pair, in one expression:
+
+```sql
+round(100 * sum(n) OVER (ORDER BY n DESC, k)
+          / sum(n) OVER (), 2)
+```
+
+The first window accumulates; the second is the grand total of whatever
+survived the `WHERE` clause.
+
+## Hint 3
+
+Roll up to one row per country with a `GROUP BY` first — twelve rows, then
+two windows over them. `count(*)` is `bigint` and `sum` of a `bigint` is
+`numeric`, so the division stays exact and `round(..., 2)` needs no cast.
+The decision left to you is whether to name the window with a `WINDOW`
+clause; you use the ordered one twice, so there is a good argument for it.
+@@@FILE ex7/importantHints.md
+## Hint 1
+
+Do the arithmetic on paper for the first two rows and you will know whether
+your query is right without reading twelve. Row one's `cum_pct` is
+`11733 / 50000`, which is 23.47. Row two's is `(11733 + 6025) / 50000`, which
+is 35.52. If your first row shows 100.00, you forgot the `ORDER BY` in the
+numerator; if every row shows the same value, you forgot it in both.
+
+## Hint 2
+
+A different failure: `cum_pct` reaching 100 before the last row, then
+staying there. That means the accumulation is finishing early, which happens
+when the window's `ORDER BY` is not total — under the default `RANGE` frame,
+tied countries share a frame and jump together. Adding `country` as a
+tie-break makes each row its own peer group and the curve strictly
+increasing.
+
+## Hint 3
+
+Be careful about what the denominator covers. `sum(customers) OVER ()`
+totals the rows that reached the window — which here is all twelve
+countries, because there is no `WHERE`. Add a filter such as `WHERE country
+<> 'US'` and the denominator changes with it, which is usually right and
+occasionally not. If you ever need a denominator over a *different*
+population than the numerator, the two have to come from different query
+levels.
+@@@FILE ex7/solution.sql
+-- v3a03_running_totals / ex7 — customer concentration curve by country.
+WITH by_country AS (
+    SELECT country,
+           count(*) AS customers
+    FROM customers
+    GROUP BY country
+)
+SELECT country,
+       customers,
+       sum(customers) OVER w AS cum_customers,
+       round(100 * sum(customers) OVER w / sum(customers) OVER (), 2) AS cum_pct
+FROM by_country
+WINDOW w AS (ORDER BY customers DESC, country)
+ORDER BY customers DESC, country;
+@@@FILE ex7/expected.sql
+WITH by_country AS (
+    SELECT country,
+           count(*) AS customers
+    FROM customers
+    GROUP BY country
+),
+base AS (
+    SELECT sum(customers) AS total FROM by_country
+)
+SELECT c.country,
+       c.customers,
+       (SELECT sum(x.customers)
+          FROM by_country x
+         WHERE x.customers > c.customers
+            OR (x.customers = c.customers AND x.country <= c.country)) AS cum_customers,
+       round(100 * (SELECT sum(x.customers)
+                      FROM by_country x
+                     WHERE x.customers > c.customers
+                        OR (x.customers = c.customers AND x.country <= c.country))
+                 / b.total, 2) AS cum_pct
+FROM by_country c
+CROSS JOIN base b
+ORDER BY c.customers DESC, c.country;
+@@@FILE ex8/prompt.md
+## Exercise 8 — cumulative and total in one pass
+
+Edit `ex8/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `created_at >=
+'2023-01-01'` — the eleven months January to November 2023. All four
+statuses (`cancelled`, `paid`, `pending`, `shipped`) occur in every month, so
+the rollup is 44 rows.
+
+Operations wants a per-status progress report: each month's revenue for that
+status, the status's running total for the year, the status's full-year
+total, and how far through its year that status was at the end of the month.
+
+Three windows, all partitioned by `status`, two of them ordered and one not
+— and the ordered and unordered ones are the numerator and denominator of
+the same fraction.
+
+Illustration for one status over four months, where the status's full year
+is 1000.00:
+
+```
+   month    | status | revenue | status_to_date | status_total | pct_complete
+------------+--------+---------+----------------+--------------+-------------
+ 2023-01-01 | paid   |  100.00 |         100.00 |      1000.00 |        10.00
+ 2023-02-01 | paid   |  200.00 |         300.00 |      1000.00 |        30.00
+ 2023-03-01 | paid   |  250.00 |         550.00 |      1000.00 |        55.00
+ 2023-04-01 | paid   |  450.00 |        1000.00 |      1000.00 |       100.00
+```
+
+`status_total` is constant within a status; `status_to_date` climbs to meet
+it; `pct_complete` reaches exactly 100.00 on the status's last month.
+
+Columns, in this order: `month` (a `date`), `status`, `revenue`,
+`status_to_date`, `status_total`, `pct_complete` (100 × `status_to_date` ÷
+`status_total`, rounded to 2 decimals).
+
+**Ordered by `status` ascending, then `month` ascending.** (44 rows.)
+
+```
+uv run dojo test v3a03_running_totals ex8
+```
+@@@FILE ex8/hints.md
+## Hint 1
+
+Two of the three derived columns come from windows that share a
+`PARTITION BY status`. What separates them is one clause, and that clause is
+the difference between "so far" and "in total".
+
+## Hint 2
+
+The pair to internalise:
+
+```sql
+sum(x) OVER (PARTITION BY g ORDER BY t) -- running, resets per group
+sum(x) OVER (PARTITION BY g)            -- the group's total, on every row
+```
+
+Adding `ORDER BY` installs a cumulative frame; removing it restores the
+whole partition.
+
+## Hint 3
+
+Roll up to (`month`, `status`) with `GROUP BY 1, 2` before any window runs.
+Then the percentage divides one window by the other. You may repeat the two
+window expressions inside the `round`, or name them with a `WINDOW` clause
+and use each name twice — PostgreSQL evaluates each distinct window once
+either way, so this is purely a readability decision.
+@@@FILE ex8/importantHints.md
+## Hint 1
+
+Two invariants make this self-checking. Every status's last row must show
+`pct_complete = 100.00`, and `status_total` must be identical on all eleven
+rows of a status. Check those two and you have verified both windows without
+reading a single revenue figure.
+
+## Hint 2
+
+Consider the wrong denominator:
+
+```sql
+round(100 * sum(revenue) OVER (PARTITION BY status ORDER BY month)
+          / sum(revenue) OVER (), 2)
+```
+
+`OVER ()` is the total across *all four statuses*, so `paid` — half the
+business — tops out around 50 rather than 100. The mistake is easy to make
+and easy to spot if you check the invariant first, which is the habit worth
+building.
+
+## Hint 3
+
+A structural alternative worth knowing: compute `status_total` in a separate
+`GROUP BY status` CTE and join it back. That works, produces the same
+numbers, and reads perfectly well — but it is a second pass over the monthly
+rollup, where the window is a second aggregate over the same one. On 44 rows
+this is irrelevant; on a hundred million it is the difference between one
+scan and two. Sector v3a08_window_vs_groupby makes that trade-off its whole
+subject.
+@@@FILE ex8/solution.sql
+-- v3a03_running_totals / ex8 — status-to-date against status total, one pass.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+)
+SELECT month,
+       status,
+       revenue,
+       sum(revenue) OVER to_date AS status_to_date,
+       sum(revenue) OVER whole   AS status_total,
+       round(100 * sum(revenue) OVER to_date
+                 / sum(revenue) OVER whole, 2) AS pct_complete
+FROM monthly
+WINDOW to_date AS (PARTITION BY status ORDER BY month),
+       whole   AS (PARTITION BY status)
+ORDER BY status, month;
+@@@FILE ex8/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           status,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1, 2
+),
+totals AS (
+    SELECT status, sum(revenue) AS status_total
+    FROM monthly
+    GROUP BY status
+)
+SELECT m.month,
+       m.status,
+       m.revenue,
+       (SELECT sum(x.revenue)
+          FROM monthly x
+         WHERE x.status = m.status
+           AND x.month <= m.month) AS status_to_date,
+       t.status_total,
+       round(100 * (SELECT sum(x.revenue)
+                      FROM monthly x
+                     WHERE x.status = m.status
+                       AND x.month <= m.month)
+                 / t.status_total, 2) AS pct_complete
+FROM monthly m
+JOIN totals t ON t.status = m.status
+ORDER BY m.status, m.month;
+@@@FILE challenge/prompt.md
+## Challenge — a spine, a partition and a share
+
+Edit `challenge/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)`, restricted to `product_id <= 3` and to June 2023
+(`created_at >= '2023-06-01' AND created_at < '2023-07-01'`). Ratings are the
+integers 1 to 5.
+
+Product quality wants a complete June grid: every one of the thirty days
+paired with every one of the five ratings, whether or not a review of that
+rating arrived that day. On that grid, a cumulative count per rating and how
+far through that rating's month each day is.
+
+That means a spine in **two** dimensions — `generate_series` for the days,
+`generate_series(1, 5)` for the ratings, crossed — with the counts
+left-joined on, and every missing combination becoming `0`.
+
+Illustration for one rating over four days:
+
+```
+    day     | rating | reviews | cum_reviews | rating_total | pct_of_rating
+------------+--------+---------+-------------+--------------+--------------
+ 2023-06-01 |      3 |       1 |           1 |            4 |         25.00
+ 2023-06-02 |      3 |       0 |           1 |            4 |         25.00
+ 2023-06-03 |      3 |       2 |           3 |            4 |         75.00
+ 2023-06-04 |      3 |       1 |           4 |            4 |        100.00
+```
+
+Note the second row: no reviews, so `reviews` is 0 and `cum_reviews` holds
+flat. Without the spine that row would not exist at all.
+
+One edge case to handle rather than hope about: if a rating received **no**
+reviews at all in June, its `rating_total` is 0 and the percentage is a
+division by zero. Return NULL for `pct_of_rating` in that case — `nullif` on
+the denominator is the idiomatic way.
+
+Columns, in this order: `day` (a `date`), `rating` (an integer),
+`reviews`, `cum_reviews` (running count within the rating, in day order),
+`rating_total` (that rating's June total, the same on all thirty of its
+rows), `pct_of_rating` (100 × `cum_reviews` ÷ `rating_total`, rounded to 2
+decimals, NULL when the total is zero).
+
+**Ordered by `rating` ascending, then `day` ascending.** (150 rows.)
+
+```
+uv run dojo test v3a03_running_totals challenge
+```
+@@@FILE challenge/hints.md
+## Hint 1
+
+Four stages, and naming them keeps the query honest: the days, the ratings,
+the grid (days × ratings), and the counts. Then windows over the completed
+grid.
+
+## Hint 2
+
+`generate_series` takes integers as well as timestamps:
+
+```sql
+SELECT g AS rating FROM generate_series(1, 5) AS g;
+```
+
+A `CROSS JOIN` between that and the day spine produces every combination,
+which is exactly the grid the report needs.
+
+## Hint 3
+
+The counts join onto the grid on **two** columns — day and rating — and the
+missing combinations become NULL, which `coalesce(..., 0)` turns into
+zeroes. From there both windows partition by `rating`; one is ordered and
+one is not. The decision left to you is whether to aggregate the reviews
+first and join on equality, or to left-join the raw rows and count them: one
+of those scans `reviews` once.
+@@@FILE challenge/importantHints.md
+## Hint 1
+
+Start with the shape and ignore the numbers. Your result must have exactly
+150 rows: thirty days times five ratings. If it has fewer, the grid is not
+complete — either the cross join is missing or a filter after the left join
+has deleted the empty combinations. Get to 150 before you compute anything.
+
+## Hint 2
+
+The division-by-zero case is worth reasoning about rather than patching.
+`sum(reviews) OVER (PARTITION BY rating)` is `0` for a rating with no June
+reviews, and `x / 0` on `numeric` raises an error rather than returning
+NULL or infinity — the query fails outright, on data that is perfectly
+legitimate. `nullif(denominator, 0)` converts the zero into a NULL, and
+`anything / NULL` is NULL, which propagates cleanly through `round`.
+
+## Hint 3
+
+Check one more invariant when it runs: for each rating, the last row's
+`cum_reviews` equals its `rating_total`, and `pct_of_rating` is 100.00 (or
+NULL for an empty rating). Five ratings, five checks, and they collectively
+prove both the partitioning and the accumulation.
+@@@FILE challenge/solution.sql
+-- v3a03_running_totals / challenge — a two-dimensional spine with cumulative shares.
+WITH days AS (
+    SELECT d::date AS day
+    FROM generate_series('2023-06-01'::date,
+                         '2023-06-30'::date,
+                         INTERVAL '1 day') AS d
+),
+ratings AS (
+    SELECT g AS rating FROM generate_series(1, 5) AS g
+),
+grid AS (
+    SELECT days.day, ratings.rating
+    FROM days
+    CROSS JOIN ratings
+),
+counted AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           rating,
+           count(*)                            AS reviews
+    FROM reviews
+    WHERE product_id <= 3
+      AND created_at >= '2023-06-01'
+      AND created_at <  '2023-07-01'
+    GROUP BY 1, 2
+),
+filled AS (
+    SELECT g.day,
+           g.rating,
+           coalesce(c.reviews, 0) AS reviews
+    FROM grid g
+    LEFT JOIN counted c ON c.day = g.day AND c.rating = g.rating
+)
+SELECT day,
+       rating,
+       reviews,
+       sum(reviews) OVER running AS cum_reviews,
+       sum(reviews) OVER whole   AS rating_total,
+       round(100 * sum(reviews) OVER running
+                 / nullif(sum(reviews) OVER whole, 0), 2) AS pct_of_rating
+FROM filled
+WINDOW running AS (PARTITION BY rating ORDER BY day),
+       whole   AS (PARTITION BY rating)
+ORDER BY rating, day;
+@@@FILE challenge/expected.sql
+WITH days AS (
+    SELECT d::date AS day
+    FROM generate_series('2023-06-01'::date,
+                         '2023-06-30'::date,
+                         INTERVAL '1 day') AS d
+),
+grid AS (
+    SELECT days.day, g.rating
+    FROM days
+    CROSS JOIN (SELECT generate_series(1, 5) AS rating) g
+),
+june AS (
+    SELECT date_trunc('day', created_at)::date AS day, rating
+    FROM reviews
+    WHERE product_id <= 3
+      AND created_at >= '2023-06-01'
+      AND created_at <  '2023-07-01'
+),
+filled AS (
+    SELECT g.day,
+           g.rating,
+           count(j.rating) AS reviews
+    FROM grid g
+    LEFT JOIN june j ON j.day = g.day AND j.rating = g.rating
+    GROUP BY g.day, g.rating
+),
+totals AS (
+    SELECT rating, sum(reviews) AS rating_total
+    FROM filled
+    GROUP BY rating
+)
+SELECT f.day,
+       f.rating,
+       f.reviews,
+       (SELECT sum(x.reviews)
+          FROM filled x
+         WHERE x.rating = f.rating
+           AND x.day <= f.day) AS cum_reviews,
+       t.rating_total,
+       round(100 * (SELECT sum(x.reviews)
+                      FROM filled x
+                     WHERE x.rating = f.rating
+                       AND x.day <= f.day)
+                 / nullif(t.rating_total, 0), 2) AS pct_of_rating
+FROM filled f
+JOIN totals t ON t.rating = f.rating
+ORDER BY f.rating, f.day;
+@@@FILE review1/prompt.md
+## Spaced review
+
+Edit `review1/solution.sql`.
+
+Works against `customers(id int, name text, email text, country text,
+created_at timestamptz)` — 50,000 rows, signup dates spanning 2021-11-14 to
+2023-11-14. Restrict to `country = 'CA'` (2,975 customers).
+
+Growth wants the Canadian signup curve: new customers per calendar month,
+and the cumulative total at the end of each month.
+
+Illustration on four months:
+
+```
+   month    | new_customers | cum_customers
+------------+---------------+--------------
+ 2021-11-01 |            42 |            42
+ 2021-12-01 |            98 |           140
+ 2022-01-01 |           105 |           245
+ 2022-02-01 |            96 |           341
+```
+
+The final row's `cum_customers` must equal 2975 — every Canadian customer,
+counted exactly once. That is the check.
+
+Roll up to one row per month with `date_trunc('month', created_at)::date`
+before windowing.
+
+Columns, in this order: `month` (a `date`), `new_customers`,
+`cum_customers`.
+
+**Ordered by `month` ascending.**
+
+```
+uv run dojo test v3a03_running_totals review1
+```
+@@@FILE review1/hints.md
+## Hint 1
+
+The simplest shape in the sector: group to months, then one cumulative
+column over the grouped rows.
+
+## Hint 2
+
+```sql
+sum(n) OVER (ORDER BY month)
+```
+
+An ordered window with no frame clause accumulates from the start of the
+partition to the current row. There is only one partition here, because
+there is no `PARTITION BY`.
+
+## Hint 3
+
+`count(*)` returns `bigint` and `sum` of a `bigint` returns `numeric`, so
+your cumulative column will be numeric — expected, and not something to cast
+away. The decision left to you is where the `country = 'CA'` filter goes: in
+the `WHERE` of the aggregating stage, where it reduces work, or outside,
+where it would be far too late.
+@@@FILE review1/importantHints.md
+## Hint 1
+
+Check the total first. `SELECT count(*) FROM customers WHERE country = 'CA'`
+is 2975. If your last `cum_customers` is not 2975, either the filter is in
+the wrong place or the window is not covering every month.
+
+## Hint 2
+
+Consider what a *missing* month would do here. If Canada had a month with no
+signups, that month would be absent from the result — and the cumulative
+column would still be correct at every row it reports, because a running
+total is insensitive to gaps. Contrast that with exercise 6, where the same
+gap ruined a rolling average. Knowing which reports are gap-sensitive is
+half of what this sector teaches.
+
+## Hint 3
+
+If you want a second pass at the same idea, add a `pct_of_base` column —
+`100 * cum_customers / sum(new_customers) OVER ()` rounded to 2 decimals —
+and confirm that it ends at exactly 100.00. It is not required for the gate,
+but it re-tests exercise 7 in a single line.
+@@@FILE review1/solution.sql
+-- v3a03_running_totals / review1 — the Canadian signup curve.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)                              AS new_customers
+    FROM customers
+    WHERE country = 'CA'
+    GROUP BY 1
+)
+SELECT month,
+       new_customers,
+       sum(new_customers) OVER (ORDER BY month) AS cum_customers
+FROM monthly
+ORDER BY month;
+@@@FILE review1/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)                              AS new_customers
+    FROM customers
+    WHERE country = 'CA'
+    GROUP BY 1
+)
+SELECT m.month,
+       m.new_customers,
+       (SELECT sum(x.new_customers)
+          FROM monthly x
+         WHERE x.month <= m.month) AS cum_customers
+FROM monthly m
+ORDER BY m.month;

@@ -1,0 +1,664 @@
+@@@META
+{
+  "slug": "v3a04_lag_lead_periods",
+  "title": "V3·A4 — LAG, LEAD, and period-over-period",
+  "summary": "Month-over-month, year-over-year, time-between-events, local peaks: all of them are one row looking at its neighbour. LAG and LEAD do that in one pass — as long as you remember they count rows, not time, and that the NULL at the edge is the truth rather than a bug to coalesce away."
+}
+@@@FILE briefing.md
+# V3·A4 — LAG, LEAD, and period-over-period
+
+Half of business reporting is a comparison to the previous something.
+Revenue against last month. Signups against the same month last year. The
+gap between a customer's orders. Whether today was a local peak. Every one
+of those is the same operation: put a value from a neighbouring row onto
+this row, then do arithmetic.
+
+Before window functions, that meant a self-join on `month = month - 1`, or a
+correlated subquery fetching the largest date smaller than this one. Both
+work and both are slow, and both fail in an interesting way when a month is
+missing. `lag` and `lead` replace them with one pass — and inherit exactly
+one of the two failure modes, which is what this sector is really about.
+
+Sector v3a03_running_totals established the discipline: roll up to the grain
+of the report, then window over the small result. Everything here assumes
+it.
+
+## Concept
+
+```sql
+lag(revenue)        OVER (ORDER BY month)   -- the previous row's revenue
+lead(revenue)       OVER (ORDER BY month)   -- the next row's revenue
+lag(revenue, 12)    OVER (ORDER BY month)   -- twelve rows back
+lag(revenue, 1, 0)  OVER (ORDER BY month)   -- previous row, or 0 at the edge
+first_value(revenue) OVER w                 -- the first row of the frame
+last_value(revenue)  OVER w                 -- the last row of the frame
+nth_value(revenue, 3) OVER w                -- the third row of the frame
+```
+
+Read `lag(x, n)` as **"the value of `x` `n` rows earlier in window order"**.
+Rows, not time. That sentence is the whole sector. `lag(revenue, 12)` is
+"twelve rows back", and it is a year-ago comparison only if the series
+contains exactly one row per month with no gaps. On a series where March had
+no orders, `lag(revenue, 12)` on the following March quietly compares
+against February.
+
+The value returned when there is no such row is NULL, and arithmetic with
+NULL is NULL, so the first row's `delta` and `pct_change` come out empty.
+That is the correct display for "there is no previous month". The third
+argument replaces it: `lag(revenue, 1, 0)` substitutes zero, which turns
+"unknown" into "nothing", makes the first month look like infinite growth,
+and is almost always a lie. Use it when zero really is the right prior
+value — a counter that starts at zero, a balance before the first
+transaction — and not to tidy up a report.
+
+`lag` and `lead` **ignore the frame clause**. They are position functions,
+not aggregates; only `first_value`, `last_value` and `nth_value` respect the
+frame, which is why `last_value` needs `ROWS BETWEEN UNBOUNDED PRECEDING AND
+UNBOUNDED FOLLOWING` to mean what everyone expects (sector
+v3a01_window_frames, exercise 8).
+
+## The arithmetic
+
+```sql
+revenue - lag(revenue) OVER w                             AS delta
+round(100 * (revenue - lag(revenue) OVER w)
+          / nullif(lag(revenue) OVER w, 0), 2)            AS pct_change
+```
+
+Two things to notice. First, repeating `lag(revenue) OVER w` costs nothing —
+PostgreSQL computes each distinct window expression once — but a CTE that
+computes `prev` once and does the arithmetic outside is easier to read and
+much easier to debug. Second, `nullif(prev, 0)` is not paranoia: if a month
+can legitimately be zero, dividing by it raises `division by zero` and the
+whole query fails on data that is perfectly valid. `nullif` converts the
+failure into a NULL, which propagates quietly.
+
+## Partitions
+
+```sql
+lag(revenue) OVER (PARTITION BY status ORDER BY month)
+```
+
+Without the partition, the first month of `paid` takes its "previous month"
+from the last month of `cancelled` — a comparison between two unrelated
+series that produces a number rather than an error. Any time a report is
+"per something, over time", the `PARTITION BY` is not optional.
+
+## What PostgreSQL does not have
+
+Some engines support `LAG(x) IGNORE NULLS`, which skips NULL values when
+looking backwards — the standard way to carry the last known value forward.
+PostgreSQL does not implement it. The idiomatic replacement is a
+`count`-based grouping trick or, more simply:
+
+```sql
+max(x) FILTER (WHERE x IS NOT NULL)
+    OVER (ORDER BY d ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+```
+
+which carries the last non-NULL value forward when the series is
+monotonically stamped, and a two-step "grouped by the count of non-NULLs"
+construction when it is not. Knowing the gap exists is more important than
+memorising the workaround; the usual sign that you need it is a series with
+deliberate blanks in it.
+
+## Exercise 1 — the previous row
+
+Monthly signups with the previous month beside them and the difference.
+
+## Exercise 2 — the default that lies
+
+The same series with a zero-defaulted previous month, so you can see what
+substituting zero does to the first row.
+
+## Exercise 3 — percent change, safely
+
+Daily purchase events with a percentage change against yesterday, guarded
+against a zero denominator.
+
+## Exercise 4 — twelve rows back
+
+Year-over-year revenue with `lag(revenue, 12)`, and an explicit look at why
+that offset is a claim about the series, not about the calendar.
+
+## Exercise 5 — one series per group
+
+Monthly revenue per order status, where the previous month must come from
+the same status.
+
+## Exercise 6 — baselines and the last_value trap
+
+Each status's monthly revenue indexed against its own first month, plus its
+final month — which needs a frame.
+
+## Exercise 7 — the gap between two events
+
+Consecutive orders per customer, with the elapsed time between them.
+
+## Exercise 8 — looking both ways
+
+Days that beat both of their neighbours: `lag` and `lead` in one query, with
+the comparison filtered outside the window.
+
+## Challenge — months that went backwards
+
+Per status, every month whose revenue fell more than five percent against
+the previous one.
+
+## Spaced review
+
+`review1/`: the finance team's hiring gaps — for each hire, the next hire
+after them and how many days later it happened.
+@@@FILE explanation.md
+# Reading - sql/v3a04_lag_lead_periods
+
+`lag(x, n)` is "the value of `x`, `n` rows earlier in window order". Every
+mistake in this sector comes from reading that sentence as if it said
+"earlier in time".
+
+## Notes
+
+**Rows, not time.** `lag(revenue, 12)` reaches twelve rows back. If the
+series is a complete monthly rollup, that is a year. If a month is missing —
+because nothing happened, or because a filter removed it — it is eleven
+months and some, and nothing tells you. The robust alternatives are a
+calendar spine that guarantees one row per period (sector
+v3a03_running_totals) or an explicit join on a computed period key, which
+compares by value rather than by position.
+
+**The edge NULL is information.** The first row has no predecessor; its
+`prev` is NULL and every arithmetic column built on it is NULL. That is the
+truthful rendering of "no comparison available". `coalesce(prev, 0)` and
+`lag(x, 1, 0)` both replace it with a claim — "the previous month was zero"
+— which then produces a delta equal to the whole month and a percentage
+change of infinity or an error.
+
+**`nullif` on the denominator, always.** `pct_change` divides by the
+previous value. If that value can be zero — a quiet day, a new status, a
+product with no sales — `numeric` division raises an error and the query
+fails. `nullif(prev, 0)` turns the error into a NULL.
+
+**`lag` and `lead` ignore the frame.** They are not aggregates. Adding a
+frame clause to their `OVER` is legal and has no effect. `first_value`,
+`last_value` and `nth_value` are the opposite: they are entirely defined by
+the frame, which is why `last_value` with the default frame returns the
+current row.
+
+**Partition before you compare.** A `lag` without a `PARTITION BY` on a
+multi-series report compares the first row of one series with the last row
+of the previous one. The result is a plausible number in the wrong place.
+
+**Two neighbours, one query.** `lag` and `lead` over the same window let a
+row compare itself against both sides. Filtering on that comparison needs a
+second query level, since window functions cannot appear in `WHERE`.
+
+**Timestamps subtract to intervals.** `created_at - lag(created_at) OVER w`
+is an `interval`, not a number. `extract(epoch FROM interval)` gives seconds
+as a `numeric` in PostgreSQL 14 and later — but write `::numeric` anyway if
+you intend to `round`, because the same expression on older servers is a
+`double precision` and `round(double precision, int)` does not exist.
+
+**PostgreSQL has no `IGNORE NULLS`.** The standard's null-skipping option on
+`lag`/`lead` is unimplemented. When you need last-known-value carry-forward,
+build it from an aggregate over a cumulative frame instead.
+
+**`lag` and `lead` are cheap; `lead` is slightly less cheap.** Neither
+accumulates anything — they read a buffered row at a fixed offset, so the
+cost of the query is the sort beneath the window and nothing else. But
+`lead` requires the executor to look at rows it has not yet emitted, so a
+partition cannot be streamed and released as it goes. On a partition large
+enough to spill out of `work_mem`, the backward-looking spelling of a report
+is the cheaper one.
+
+**Several neighbours, one sort.** `lag`, `lead`, `first_value` and a running
+`sum` over the same `PARTITION BY`/`ORDER BY` all share a single `WindowAgg`
+node. The self-join equivalents are one pass each. This is the largest
+performance argument for window functions and it holds at every scale.
+
+**`coalesce(lag(x) OVER w, 0)` is not `lag(x, 1, 0) OVER w`.** The default
+argument fires only at the partition edge; `coalesce` also rewrites genuine
+NULLs inside the data. If the source column is nullable, those two queries
+disagree on rows nobody was thinking about.
+
+## ex1 — the previous row
+
+The base case. The first row's NULLs are the thing to look at, not to fix.
+
+## ex2 — the default that lies
+
+Same series, one extra argument. Comparing the two columns side by side is
+the whole exercise: the zero-defaulted version makes January look like
+infinite growth from nothing.
+
+## ex3 — percent change, safely
+
+The `nullif` is the point. Write the query without it first, on a series
+that happens to contain no zeroes, and notice that the bug is invisible
+until the day it is not.
+
+## ex4 — twelve rows back
+
+Thirteen months of data means exactly one row can have a year-ago
+comparison. That single non-NULL row is a good reminder that a year-over-year
+report needs more than a year of data — and that `lag(x, 12)` is a claim
+about the series shape.
+
+## ex5 — one series per group
+
+Remove the `PARTITION BY` and the numbers stay plausible. That is what makes
+this worth an exercise rather than a sentence.
+
+## ex6 — baselines and the last_value trap
+
+`first_value` is correct under the default frame by luck; `last_value` is
+not. Both are frame-sensitive, and only one of them exposes it.
+
+## ex7 — the gap between two events
+
+`lag` over a timestamp, then interval arithmetic. The per-customer partition
+matters: without it, one customer's first order is compared against another
+customer's last.
+
+## ex8 — looking both ways
+
+A local peak is a row greater than both neighbours. Both comparisons need a
+second query level, because the window values do not exist during `WHERE`.
+
+## challenge — months that went backwards
+
+Partitioned lag, a guarded percentage, and a filter outside the window: the
+three habits of the sector in one query.
+
+## review1 — hiring gaps
+
+`lead` instead of `lag`, and the NULL lands at the end of the series rather
+than the beginning.
+
+## Further reading
+
+- [Window Functions](https://www.postgresql.org/docs/16/functions-window.html) — the definitions of `lag`, `lead`, `first_value`, `last_value`, `nth_value`, and the explicit note that the first four ignore the frame.
+- [Window Function Calls](https://www.postgresql.org/docs/16/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — frame syntax, and the sentence that `last_value` respects it.
+- [Conditional Expressions](https://www.postgresql.org/docs/16/functions-conditional.html) — `nullif` and `coalesce`, the two halves of handling an edge value.
+- [Date/Time Functions and Operators](https://www.postgresql.org/docs/16/functions-datetime.html) — timestamp subtraction, `extract(epoch ...)`, and the return types that decide whether `round` compiles.
+- [Aggregate Functions](https://www.postgresql.org/docs/16/functions-aggregate.html) — the `FILTER` clause, which is how you fake `IGNORE NULLS`.
+@@@FILE fullReadme.md
+# V3·A4 — LAG, LEAD, and period-over-period
+
+One row, its neighbour, and the arithmetic between them.
+
+## Concept
+
+### The two functions
+
+```sql
+lag(x)          OVER (ORDER BY t)   -- previous row, NULL at the start
+lead(x)         OVER (ORDER BY t)   -- next row, NULL at the end
+lag(x, 3)       OVER (ORDER BY t)   -- three rows back
+lag(x, 1, 0)    OVER (ORDER BY t)   -- previous row, 0 instead of NULL
+lead(x, 1, x)   OVER (ORDER BY t)   -- next row, this row's value at the end
+```
+
+The offset is a row count. The default is used only at the edge, where no
+such row exists.
+
+### The standard derived columns
+
+```sql
+WITH monthly AS (...),
+     with_prev AS (
+         SELECT month, revenue,
+                lag(revenue) OVER (ORDER BY month) AS prev
+         FROM monthly
+     )
+SELECT month, revenue, prev,
+       revenue - prev                                   AS delta,
+       round(100 * (revenue - prev) / nullif(prev, 0), 2) AS pct_change
+FROM with_prev
+ORDER BY month;
+```
+
+Computing `prev` once in a CTE and doing the arithmetic outside is worth the
+extra query level: the alternative repeats a nine-character window call four
+times and hides a typo beautifully.
+
+### Partitions
+
+```sql
+lag(revenue) OVER (PARTITION BY status ORDER BY month)
+```
+
+Every "per X over time" report needs this. The bug it prevents produces
+numbers, not errors.
+
+### Frame-sensitive cousins
+
+```sql
+SELECT month, status, revenue,
+       first_value(revenue) OVER w AS first_month,
+       last_value(revenue)  OVER w AS last_month
+FROM monthly
+WINDOW w AS (PARTITION BY status ORDER BY month
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY status, month;
+```
+
+Drop the frame and `last_month` becomes a copy of `revenue`, because the
+default frame ends at the current row. `lag` and `lead` are immune — they
+ignore frames entirely.
+
+## Worked example — year over year, done twice
+
+The tempting version:
+
+```sql
+SELECT month, revenue,
+       lag(revenue, 12) OVER (ORDER BY month) AS year_ago
+FROM monthly ORDER BY month;
+```
+
+This is correct **if and only if** `monthly` has exactly one row per month
+with no gaps. The version that does not depend on that:
+
+```sql
+SELECT m.month, m.revenue, p.revenue AS year_ago
+FROM monthly m
+LEFT JOIN monthly p ON p.month = m.month - INTERVAL '1 year'
+ORDER BY m.month;
+```
+
+The join compares by *value*. A missing month produces a NULL rather than a
+wrong number, which is the difference between a report that fails loudly and
+one that fails quietly. The window version is faster and reads better; use
+it when a calendar spine guarantees the shape, and use the join when it does
+not.
+
+## Worked example — time between events
+
+```sql
+WITH ordered AS (
+    SELECT customer_id, id, created_at,
+           lag(created_at) OVER (PARTITION BY customer_id
+                                 ORDER BY created_at, id) AS prev_at
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 10
+)
+SELECT customer_id, id, created_at, prev_at,
+       round(extract(epoch FROM created_at - prev_at)::numeric / 86400, 2)
+           AS days_since_prev
+FROM ordered
+ORDER BY customer_id, created_at, id;
+```
+
+Three details. The partition, so one customer's first order is not compared
+with another's last. The `, id` tie-break, because two orders can share a
+timestamp and `lag` over a non-unique ordering is undefined among peers. And
+the `::numeric` cast, because `round(x, 2)` requires a numeric — the
+two-argument `round` simply does not exist for `double precision`.
+
+## Worked example — the local peak, and why it needs two levels
+
+```sql
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day, count(*) AS purchases
+    FROM events WHERE event_type = 'purchase' GROUP BY 1
+),
+neighbours AS (
+    SELECT day, purchases,
+           lag(purchases)  OVER (ORDER BY day) AS prev_day,
+           lead(purchases) OVER (ORDER BY day) AS next_day
+    FROM daily
+)
+SELECT day, purchases, prev_day, next_day
+FROM neighbours
+WHERE purchases > prev_day
+  AND purchases > next_day
+ORDER BY day;
+```
+
+Two things are doing quiet work here. The filter is in a second query level
+because `WHERE purchases > lag(purchases) OVER (...)` is rejected outright —
+window functions are computed after `WHERE`, so the value does not exist
+when the filter runs. And the first and last rows of the series drop out
+with no special case at all: `6900 > NULL` is unknown, `WHERE` keeps only
+rows where the predicate is *true*, and unknown is not true. SQL's
+three-valued logic, which is usually a nuisance, is exactly right here.
+
+Swap both comparisons to `>=` and you get a different report — every day of
+a plateau counts as a peak. Neither is more correct; the query should simply
+say which one it means.
+
+## Worked example — carrying the last known value forward
+
+The PostgreSQL replacement for `LAG(x) IGNORE NULLS`, which is worth
+recognising when you meet it:
+
+```sql
+WITH marked AS (
+    SELECT day, price,
+           count(price) OVER (ORDER BY day) AS grp
+    FROM series
+)
+SELECT day, price,
+       max(price) OVER (PARTITION BY grp) AS last_known
+FROM marked
+ORDER BY day;
+```
+
+`count(price)` ignores NULLs, so it does not advance on a blank row. Every
+NULL therefore shares a `grp` value with the last non-NULL row above it, and
+`max` within that group hands the value down. Two windows, one pass, no
+recursion.
+
+## Common mistakes
+
+- **Treating the offset as time.** `lag(x, 12)` is twelve rows.
+- **`coalesce`ing the edge NULL.** It converts "no previous period" into a
+  claim about the previous period.
+- **Dividing by `prev` without `nullif`.** Works until a zero appears, then
+  fails the whole query.
+- **Forgetting `PARTITION BY`.** Cross-series comparisons that look normal.
+- **A non-unique window `ORDER BY`.** `lag` over tied rows returns one of
+  the tied values, unspecified which.
+- **Expecting a frame to affect `lag`.** It does not. Expecting the default
+  frame to be fine for `last_value`. It is not.
+- **Filtering on a `lag` result in `WHERE`.** Windows run after `WHERE`; use
+  a second query level.
+- **`round(extract(epoch ...) / 86400, 2)` without a cast.** Depending on the
+  server version that is either fine or a "function round(double precision,
+  integer) does not exist" error. Cast and stop thinking about it.
+
+## The interview answer
+
+> *How do you compute month-over-month growth in SQL?*
+
+Aggregate to one row per month, then `lag(revenue) OVER (ORDER BY month)` to
+put the previous month on each row, and compute the delta and the percentage
+in an outer query level. Three things I would call out: the first month's
+values are NULL and should stay NULL rather than being defaulted to zero;
+the percentage needs `nullif(prev, 0)` so a zero month cannot fail the
+query; and if the report is per segment, the window needs `PARTITION BY
+segment` or the first month of each segment silently compares against the
+previous segment. For year-over-year I would not use `lag(revenue, 12)`
+unless I knew every month was present — otherwise I would join on a computed
+month key, which compares by value instead of by position.
+
+## Check yourself
+
+1. Define `lag(x, n)` in one sentence, precisely.
+2. What does `lag` return on the first row of a partition, and why is that
+   the right answer?
+3. What is the third argument for, and when is it honest?
+4. Which of `lag`, `lead`, `first_value`, `last_value` respect the frame?
+5. Why is `last_value` usually wrong without an explicit frame?
+6. When is `lag(x, 12)` not a year-over-year comparison?
+7. Write the same comparison as a join, and say what it does differently.
+8. Why is `nullif(prev, 0)` in a percent-change column, and what happens
+   without it?
+9. What breaks if you omit `PARTITION BY` on a per-status monthly report?
+10. Two rows share a timestamp. What does `lag` over `ORDER BY created_at`
+    return, and how do you make it defined?
+11. Subtract two `timestamptz` values — what type comes back? How do you get
+    days as a rounded number?
+12. Write a filter that keeps only rows where revenue fell against the
+    previous month. Where does the filter go?
+13. How would you detect a local maximum in a daily series?
+14. PostgreSQL has no `IGNORE NULLS` on `lag`. What is the usual
+    replacement, and what problem is it solving?
+@@@FILE fullReading.md
+# Reading - sql/v3a04_lag_lead_periods
+
+`lag` and `lead` look like conveniences and are actually the feature that
+made a whole class of query practical. Everything else in this sector is a
+consequence of how they are implemented.
+
+## What the executor does
+
+`lag` and `lead` are window functions, so they run in a `WindowAgg` node
+over sorted input. But unlike `sum` or `avg` they are not aggregates — they
+do not accumulate a transition state. They read a specific row from the
+partition buffer, at a fixed offset from the current one.
+
+That has two consequences worth knowing. First, `lag` is essentially free:
+one buffer lookup per row, no arithmetic over a frame, no incremental state.
+The cost of a `lag` query is the sort beneath it and nothing else. Second,
+`lead` requires the executor to hold rows it has not yet emitted — it must
+read ahead — so a partition cannot be streamed and discarded the way a
+purely backward-looking cumulative window can. On enormous partitions that
+is the difference between a window that fits in `work_mem` and one that
+spills to a temporary file. If you have the choice between expressing
+something with `lag` and expressing it with `lead`, `lag` is the cheaper
+half.
+
+Because `lag` and `lead` are positional rather than accumulative, the frame
+clause is meaningless to them and PostgreSQL ignores it. This is stated in
+the documentation and surprises people constantly, because `first_value`
+sits in the same table of functions and behaves in exactly the opposite way.
+The rule to memorise: `lag`, `lead`, `row_number`, `rank`, `dense_rank`,
+`ntile`, `percent_rank` and `cume_dist` ignore the frame; `first_value`,
+`last_value` and `nth_value` obey it; every ordinary aggregate obeys it.
+
+## The offset is the whole design decision
+
+The SQL standard defines `LAG(expr, offset)` in terms of row position within
+the window partition. It could have been defined in terms of the ordering
+*value* — "the row whose month is one less than mine" — and a few analytics
+engines offer something like that as an extension. The standard did not,
+because a value-based definition requires the ordering column to have a
+well-defined predecessor, which is true for months and false for timestamps,
+floats and text.
+
+The practical fallout is that every period-over-period query carries an
+implicit assumption: the series is complete at the grain you are comparing.
+There are exactly three honest responses to that assumption.
+
+You can **guarantee** it, with a calendar spine — `generate_series` over the
+periods, left-joined to the data, so every period exists whether or not
+anything happened in it. Then `lag(x, 12)` really is a year. This is what
+warehouse date dimensions are for, and it is the cleanest answer when the
+report is recurring.
+
+You can **avoid** it, by joining on a computed period key rather than a
+position: `ON p.month = m.month - INTERVAL '1 year'`. The join compares
+values, so a missing period yields NULL instead of a wrong number. It costs
+a second scan and it is bulletproof.
+
+Or you can **check** it, by asserting the row count — `count(*) OVER ()`
+equal to the number of periods you expect — and letting the query be a lie
+if the assertion is not run. Two of those three are engineering; the third
+is what most production reports actually do.
+
+## Timestamps, intervals and types
+
+`timestamptz - timestamptz` yields an `interval`, which is a structured
+value with months, days and microseconds — not a number. That structure
+exists because "one month" has no fixed length, and it is why you cannot
+simply compare an interval to a number of days without saying which
+conversion you want.
+
+`extract(epoch FROM interval)` flattens it to seconds, treating a month as
+30 days and a day as 24 hours. That is an approximation, and for intervals
+produced by subtracting two timestamps it is exact, because such intervals
+carry only days and microseconds. `justify_interval`, `age()` and
+`date_part` are the neighbouring tools; `age(a, b)` in particular returns a
+"human" interval in years and months, which is right for a person's age and
+wrong for arithmetic.
+
+One version note that bites: `extract()` returned `double precision` before
+PostgreSQL 14 and returns `numeric` from 14 onwards. Code that says
+`round(extract(epoch FROM x) / 86400, 2)` works on 14+ and fails on 13 with
+"function round(double precision, integer) does not exist". Writing
+`::numeric` explicitly makes the expression version-independent, and costs
+nothing.
+
+## The IGNORE NULLS gap
+
+SQL:2003 defines `LAG(x) IGNORE NULLS` — skip NULL values when looking
+backwards, which is exactly what "carry the last known value forward"
+requires. Oracle, SQL Server 2022 and several cloud warehouses implement it.
+PostgreSQL, as of 16, does not.
+
+The standard PostgreSQL workaround is to build a grouping key out of a
+cumulative count of non-NULL values and then take the `max` within each
+group:
+
+```sql
+WITH marked AS (
+    SELECT day, price,
+           count(price) OVER (ORDER BY day) AS grp   -- count ignores NULLs
+    FROM series
+)
+SELECT day, price,
+       max(price) OVER (PARTITION BY grp) AS last_known
+FROM marked
+ORDER BY day;
+```
+
+`count(price)` does not increment on NULL rows, so every NULL shares a group
+with the last non-NULL row above it, and `max` within that group carries the
+value forward. It is a genuinely clever construction, it is O(n), and it is
+worth recognising when you meet it in someone else's code.
+
+## Performance notes
+
+**One sort, many neighbours.** `lag`, `lead`, `first_value` and a running
+sum over the same `PARTITION BY`/`ORDER BY` all share one `WindowAgg` and
+one sort. Writing them as four separate self-joins is four passes. This is
+the single largest performance argument for window functions and it holds at
+every scale.
+
+**Roll up first.** A month-over-month report over 500,000 orders should sort
+eleven rows, not half a million. The `GROUP BY` that produces the monthly
+series is not a preliminary step; it is the report's grain.
+
+**Push filters below the window.** `WHERE created_at >= '2023-01-01'` inside
+the aggregating CTE reduces the sort. Outside it, the same predicate cannot
+be pushed through the `WindowAgg` — the planner may not move a qual past a
+window unless it is on a partitioning column, because doing so would change
+which rows are neighbours.
+
+**The self-join alternative is quadratic, or needs an index.** `ON p.month =
+m.month - INTERVAL '1 year'` over a small monthly rollup is nothing; the
+same shape over a raw event table with no index is a hash join over millions
+of rows, twice.
+
+## When not to use them
+
+**When the comparison is not to a neighbour.** "Against the year's average"
+is `avg(x) OVER ()`, not a `lag`. "Against the best month so far" is a
+running `max`. Reaching for `lag` when the requirement says "against the
+baseline" produces a chain of offsets that nobody can read.
+
+**When the series has meaningful gaps and you cannot spine it.** Use the
+value join. It is slower and it is right.
+
+**When you need the previous row's value inside an `UPDATE`.** Window
+functions are not allowed in the `SET` list of an `UPDATE` directly; you
+need a `FROM` subquery that computes them. That is a real restriction and it
+catches people migrating a report into a maintenance job.
+
+**When the "previous" is defined by business rules rather than order.** "The
+previous *completed* order, excluding cancellations" is a filter plus a lag,
+and the filter must run before the window — which means a subquery, and
+means you should check whether the rows you removed were supposed to count
+as neighbours at all. That question is usually where the real requirement
+hides.

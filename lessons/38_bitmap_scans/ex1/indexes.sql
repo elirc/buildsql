@@ -1,1 +1,0 @@
--- 38_bitmap_scans/ex1: TWO single-column indexes here

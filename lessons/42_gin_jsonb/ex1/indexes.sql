@@ -1,1 +1,0 @@
--- 42_gin_jsonb/ex1: your GIN index here

@@ -1,0 +1,1 @@
+The collector decides when memory is reclaimed; you decide when everything else is. This sector is the deterministic half: the dispose pattern and when you genuinely need it, ownership and leaveOpen, IAsyncDisposable and flushing, disposal order, the exception a Dispose can hide, and unsubscribing as a resource.

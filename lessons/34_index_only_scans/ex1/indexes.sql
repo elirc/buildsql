@@ -1,1 +1,0 @@
--- 34_index_only_scans/ex1: your CREATE INDEX here

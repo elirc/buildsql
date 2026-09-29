@@ -1,0 +1,308 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Archive, ArrowLeft, BookOpen, BrainCircuit, Check, ChevronRight, Circle,
+  Code2, Download, Flame, Gamepad2, Home, Import, Library, LockKeyhole,
+  Map, Menu, RotateCcw, Save, Settings, ShieldCheck, Sparkles, Swords,
+  Target, Trophy, X, Zap,
+} from 'lucide-react'
+import { loadIndex, loadResources, loadTrack } from './content'
+import {
+  completeMission, dueReviewIds, initialSave, lessonUnlocked, levelFor,
+  loadSave, missionKey, missionUnlocked, persistSave, progressToNextLevel, xpFor,
+} from './game'
+import { Markdown } from './Markdown'
+import type { ContentIndex, Lesson, Mission, ResourceDoc, SaveState, TrackMeta, TrackPack, View } from './types'
+
+const worldTone: Record<string, string> = {
+  sql: 'cyan', typescript: 'violet', node: 'lime', react: 'blue', csharp: 'amber', dotnet: 'rose',
+}
+
+function compactTitle(title: string) {
+  return title.replace(/^\d+\s*[—-]\s*/, '').replace(/^[a-z]\d+\s*[—-]\s*/i, '')
+}
+
+function missionTitle(mission: Mission) {
+  const heading = mission.prompt.match(/^##\s+(.+)$/m)?.[1]
+  return compactTitle(heading ?? mission.title).replace(/^(exercise\s+\d+|ex\d+)\s*[—-]?\s*/i, '') || mission.id
+}
+
+function briefingCore(lesson: Lesson) {
+  return lesson.briefing.split(/\n##\s+(?:Exercise\s+1\b|ex1\b|Challenge\b)/i)[0]
+}
+
+function App() {
+  const [index, setIndex] = useState<ContentIndex | null>(null)
+  const [pack, setPack] = useState<TrackPack | null>(null)
+  const [save, setSave] = useState<SaveState>(() => loadSave())
+  const [view, setView] = useState<View>('home')
+  const [lesson, setLesson] = useState<Lesson | null>(null)
+  const [mission, setMission] = useState<Mission | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [navOpen, setNavOpen] = useState(false)
+
+  useEffect(() => {
+    loadIndex().then(setIndex).catch(console.error)
+  }, [])
+
+  useEffect(() => {
+    setLoading(true)
+    loadTrack(save.selectedTrack)
+      .then((value) => setPack(value))
+      .catch(console.error)
+      .finally(() => setLoading(false))
+  }, [save.selectedTrack])
+
+  useEffect(() => persistSave(save), [save])
+
+  const xp = xpFor(save)
+  const level = progressToNextLevel(xp)
+  const due = dueReviewIds(save)
+
+  function mutate(change: (current: SaveState) => SaveState) {
+    setSave((current) => change(current))
+  }
+
+  function selectTrack(track: TrackMeta | { id: string }) {
+    mutate((current) => ({ ...current, selectedTrack: track.id }))
+    setLesson(null)
+    setMission(null)
+    setView('journey')
+  }
+
+  function openMission(nextLesson: Lesson, nextMission: Mission) {
+    setLesson(nextLesson)
+    setMission(nextMission)
+    setView('mission')
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
+
+  function continueJourney() {
+    if (!pack) return
+    for (let i = 0; i < pack.lessons.length; i += 1) {
+      const candidate = pack.lessons[i]
+      if (!lessonUnlocked(pack.lessons, i, save)) break
+      const next = candidate.exercises.find(
+        (item) => missionUnlocked(candidate, item, save) && !save.completed[missionKey(candidate, item)]
+      )
+      if (next) return openMission(candidate, next)
+    }
+    setView('journey')
+  }
+
+  const nav = [
+    { id: 'home' as View, label: 'Command', icon: Home },
+    { id: 'journey' as View, label: 'Journey', icon: Map },
+    { id: 'reviews' as View, label: 'Review queue', icon: BrainCircuit, badge: due.length },
+    { id: 'library' as View, label: 'Knowledge vault', icon: Library },
+    { id: 'settings' as View, label: 'Save data', icon: Settings },
+  ]
+
+  return (
+    <div className="app-shell">
+      <button className="mobile-menu" onClick={() => setNavOpen(true)} aria-label="Open menu"><Menu /></button>
+      <aside className={`sidebar ${navOpen ? 'sidebar--open' : ''}`}>
+        <button className="sidebar-close" onClick={() => setNavOpen(false)} aria-label="Close menu"><X /></button>
+        <div className="brand" onClick={() => setView('home')}>
+          <div className="brand-mark"><Code2 size={21} /></div>
+          <div><strong>IPSKILL</strong><span>LEVEL UP BY BUILDING</span></div>
+        </div>
+        <div className="operative-card">
+          <div className="avatar">{save.playerName.slice(0, 2).toUpperCase()}</div>
+          <div><span>OPERATIVE</span><strong>{save.playerName}</strong><small>Level {level.level} builder</small></div>
+        </div>
+        <nav>
+          {nav.map((item) => (
+            <button key={item.id} className={view === item.id ? 'active' : ''} onClick={() => { setView(item.id); setNavOpen(false) }}>
+              <item.icon size={18} /><span>{item.label}</span>{Boolean(item.badge) && <b>{item.badge}</b>}
+            </button>
+          ))}
+        </nav>
+        <div className="sidebar-level">
+          <div><span>LVL {level.level}</span><span>{xp.toLocaleString()} XP</span></div>
+          <div className="meter"><i style={{ width: `${level.percent}%` }} /></div>
+          <small>{level.needed - level.current} XP to level {level.level + 1}</small>
+        </div>
+        <div className="streak"><Flame size={18} /><strong>{save.streak} day streak</strong><span>Keep the signal alive</span></div>
+      </aside>
+
+      <main>
+        <header className="topbar">
+          <div className="crumb"><span>IPSKILL</span><ChevronRight size={14} /><strong>{view === 'mission' ? compactTitle(mission?.title ?? 'Mission') : nav.find((item) => item.id === view)?.label}</strong></div>
+          <div className="top-stats"><span><Zap size={15} /> {xp.toLocaleString()} XP</span><span><Flame size={15} /> {save.streak}</span><span className="online"><i /> SAVE ONLINE</span></div>
+        </header>
+
+        <div className="page">
+          {loading || !index || !pack ? <Loading /> : (
+            <>
+              {view === 'home' && <HomeView index={index} pack={pack} save={save} onTrack={selectTrack} onContinue={continueJourney} />}
+              {view === 'journey' && <JourneyView index={index} pack={pack} save={save} onTrack={selectTrack} onMission={openMission} />}
+              {view === 'mission' && lesson && mission && (
+                <MissionView
+                  lesson={lesson} mission={mission} save={save}
+                  onBack={() => setView('journey')}
+                  onWork={(value) => mutate((current) => ({ ...current, work: { ...current.work, [missionKey(lesson, mission)]: value } }))}
+                  onComplete={() => mutate((current) => completeMission(current, missionKey(lesson, mission), new Date(), mission.xp))}
+                />
+              )}
+              {view === 'reviews' && <ReviewsView pack={pack} save={save} onMission={openMission} onTrack={selectTrack} index={index} />}
+              {view === 'library' && <LibraryView pack={pack} save={save} onMission={openMission} />}
+              {view === 'settings' && <SettingsView save={save} onSave={setSave} />}
+            </>
+          )}
+        </div>
+      </main>
+    </div>
+  )
+}
+
+function Loading() {
+  return <div className="loading"><div className="loader"><i /><i /><i /></div><strong>LOADING WORLD DATA</strong><span>Decrypting mission archive…</span></div>
+}
+
+function SectionTitle({ eyebrow, title, action }: { eyebrow: string; title: string; action?: React.ReactNode }) {
+  return <div className="section-title"><div><span>{eyebrow}</span><h2>{title}</h2></div>{action}</div>
+}
+
+function HomeView({ index, pack, save, onTrack, onContinue }: { index: ContentIndex; pack: TrackPack; save: SaveState; onTrack: (track: TrackMeta) => void; onContinue: () => void }) {
+  const complete = Object.keys(save.completed).length
+  const nextLesson = pack.lessons.find((item, i) => lessonUnlocked(pack.lessons, i, save) && item.exercises.some((mission) => !save.completed[missionKey(item, mission)])) ?? pack.lessons[0]
+  const nextMission = nextLesson.exercises.find((mission) => missionUnlocked(nextLesson, mission, save) && !save.completed[missionKey(nextLesson, mission)]) ?? nextLesson.exercises[0]
+  return <>
+    <section className="hero">
+      <div className="hero-copy"><span className="eyebrow">// ACTIVE CAMPAIGN</span><h1>Build your edge.<br /><em>One mission at a time.</em></h1><p>Reading is intel. Building is how you rank up. Complete missions, defeat challenge gates, and revisit skills before they decay.</p><button className="primary" onClick={onContinue}><Gamepad2 size={19} /> Continue mission <ChevronRight size={18} /></button></div>
+      <div className="hero-mission">
+        <div className="mission-scan" />
+        <span>NEXT MISSION</span><b>{pack.name}</b><h3>{compactTitle(nextLesson.title)}</h3><p>{missionTitle(nextMission)}</p>
+        <div className="reward"><Zap size={16} /> +{nextMission.xp} XP <i /> {nextLesson.order + 1} / {pack.lessons.length}</div>
+      </div>
+    </section>
+    <section className="stat-grid">
+      <article><Target /><div><strong>{complete}</strong><span>Missions cleared</span></div></article>
+      <article><Trophy /><div><strong>{Math.floor(complete / 8)}</strong><span>Challenge gates</span></div></article>
+      <article><BrainCircuit /><div><strong>{dueReviewIds(save).length}</strong><span>Reviews due</span></div></article>
+      <article><Archive /><div><strong>{index.exerciseCount.toLocaleString()}</strong><span>Total missions</span></div></article>
+    </section>
+    <SectionTitle eyebrow="CHOOSE YOUR FRONTIER" title="Six worlds. One skill tree." />
+    <div className="world-grid">
+      {index.tracks.map((track, i) => <WorldCard key={track.id} track={track} save={save} active={track.id === pack.id} index={i} onClick={() => onTrack(track)} />)}
+    </div>
+  </>
+}
+
+function WorldCard({ track, save, active, index, onClick }: { track: TrackMeta; save: SaveState; active: boolean; index: number; onClick: () => void }) {
+  const done = Object.keys(save.completed).filter((id) => id.startsWith(`${track.id}/`)).length
+  const percent = Math.min(100, Math.round((done / track.exerciseCount) * 100))
+  return <button className={`world-card tone-${worldTone[track.id]} ${active ? 'world-card--active' : ''}`} onClick={onClick}>
+    <div className="world-index">0{index + 1}</div><div className="world-icon"><Code2 /></div>
+    <span>{track.lessonCount} sectors · {track.exerciseCount} missions</span><h3>{track.name}</h3><p>{track.description}</p>
+    <div className="world-progress"><i style={{ width: `${percent}%` }} /></div><small>{percent}% liberated</small>
+  </button>
+}
+
+function JourneyView({ index, pack, save, onTrack, onMission }: { index: ContentIndex; pack: TrackPack; save: SaveState; onTrack: (track: TrackMeta) => void; onMission: (lesson: Lesson, mission: Mission) => void }) {
+  const [query, setQuery] = useState('')
+  const filtered = pack.lessons.filter((lesson) => `${lesson.title} ${lesson.summary}`.toLowerCase().includes(query.toLowerCase()))
+  return <>
+    <SectionTitle eyebrow="MISSION MAP" title={pack.name} action={<select value={pack.id} onChange={(event) => { const track = index.tracks.find((item) => item.id === event.target.value); if (track) onTrack(track) }}>{index.tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}</select>} />
+    <div className="journey-tools"><p>{pack.description}. Clear every core mission in a sector to unlock the next.</p><input aria-label="Search missions" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search sectors…" /></div>
+    <div className="lesson-list">
+      {filtered.map((lesson) => {
+        const originalIndex = pack.lessons.indexOf(lesson)
+        const unlocked = lessonUnlocked(pack.lessons, originalIndex, save)
+        const core = lesson.exercises.filter((mission) => mission.kind === 'core')
+        const done = lesson.exercises.filter((mission) => save.completed[missionKey(lesson, mission)]).length
+        return <article key={lesson.id} className={`lesson-card ${unlocked ? '' : 'locked'}`}>
+          <div className="lesson-node">{unlocked ? done === lesson.exercises.length ? <Check /> : String(originalIndex + 1).padStart(2, '0') : <LockKeyhole />}</div>
+          <div className="lesson-body"><div className="lesson-meta"><span>SECTOR {String(originalIndex + 1).padStart(2, '0')}</span><b>{done}/{lesson.exercises.length} cleared</b></div><h3>{compactTitle(lesson.title)}</h3><p>{lesson.summary || 'A focused sequence of active practice missions.'}</p>
+            <div className="mission-row">{lesson.exercises.map((mission) => {
+              const isOpen = unlocked && missionUnlocked(lesson, mission, save)
+              const complete = Boolean(save.completed[missionKey(lesson, mission)])
+              return <button key={mission.id} disabled={!isOpen} className={`${mission.kind} ${complete ? 'complete' : ''}`} onClick={() => onMission(lesson, mission)} title={`${mission.id} · ${mission.xp} XP`}>
+                {complete ? <Check size={14} /> : isOpen ? mission.kind === 'challenge' ? <Swords size={14} /> : <Circle size={12} /> : <LockKeyhole size={13} />} {mission.id}
+              </button>
+            })}</div>
+          </div>
+          <div className="lesson-reward"><span>CORE</span><strong>{core.length * 100} XP</strong></div>
+        </article>
+      })}
+    </div>
+  </>
+}
+
+function MissionView({ lesson, mission, save, onBack, onWork, onComplete }: { lesson: Lesson; mission: Mission; save: SaveState; onBack: () => void; onWork: (value: string) => void; onComplete: () => void }) {
+  const id = missionKey(lesson, mission)
+  const [tab, setTab] = useState<'brief' | 'mission' | 'debrief'>('mission')
+  const [hints, setHints] = useState(0)
+  const [ran, setRan] = useState(false)
+  const [celebrate, setCelebrate] = useState(false)
+  const completed = Boolean(save.completed[id])
+  const work = save.work[id] ?? ''
+  const hintParts = mission.importantHints.split(/(?=^##\s+Hint)/m).filter((part) => part.trim())
+  const references = Object.entries(mission.references)
+
+  function finish() {
+    onComplete(); setCelebrate(true); setTimeout(() => setCelebrate(false), 1800)
+  }
+
+  return <div className="mission-view">
+    {celebrate && <div className="xp-burst"><Sparkles /> +{mission.xp} XP</div>}
+    <div className="mission-header"><button className="back" onClick={onBack}><ArrowLeft /> Journey map</button><div className={`kind kind-${mission.kind}`}>{mission.kind === 'challenge' ? <Swords /> : <Target />}{mission.kind} mission</div><div className="mission-xp"><Zap /> {mission.xp} XP</div></div>
+    <h1>{missionTitle(mission)}</h1><p className="mission-context">{compactTitle(lesson.title)} · {mission.id}</p>
+    <div className="mission-tabs"><button className={tab === 'brief' ? 'active' : ''} onClick={() => setTab('brief')}><BookOpen /> Intel</button><button className={tab === 'mission' ? 'active' : ''} onClick={() => setTab('mission')}><Code2 /> Workspace</button><button className={tab === 'debrief' ? 'active' : ''} onClick={() => setTab('debrief')}><BrainCircuit /> Debrief</button></div>
+    {tab === 'brief' && <div className="content-panel"><div className="panel-label">MISSION INTEL // IMPORTANT CONCEPTS</div><Markdown>{briefingCore(lesson)}</Markdown><details><summary>Open the complete archived lesson</summary><Markdown>{lesson.fullReadme}</Markdown></details></div>}
+    {tab === 'mission' && <div className="workspace-grid">
+      <section className="content-panel prompt-panel"><div className="panel-label">OBJECTIVE</div><Markdown>{mission.prompt || lesson.summary}</Markdown>
+        <div className="hint-stack"><div className="hint-title"><span>Encrypted field notes</span><b>{hints}/{hintParts.length} revealed</b></div>{hintParts.slice(0, hints).map((hint, i) => <div className="hint" key={i}><Markdown compact>{hint}</Markdown></div>)}{hints < hintParts.length && <button className="secondary" onClick={() => setHints((value) => value + 1)}><ShieldCheck /> Reveal hint {hints + 1}</button>}</div>
+      </section>
+      <section className="editor-panel"><div className="editor-bar"><span><i /><i /><i /></span><b>mission-workspace.txt</b><em>AUTOSAVED</em></div><textarea aria-label="Mission workspace" value={work} onChange={(event) => onWork(event.target.value)} spellCheck={false} placeholder="Write the solution, explanation, query, or implementation plan here…" />
+        <div className="editor-actions"><span>{work.length} chars · attempt {(save.attempts[id] ?? 0) + 1}</span><button className="primary" disabled={work.trim().length < 8} onClick={() => setRan(true)}><Zap /> Run checkpoint</button></div>
+        {ran && <div className="checkpoint"><strong><ShieldCheck /> CHECKPOINT READY</strong><p>Compare your reasoning with the field reference. Be strict: understanding why it works is part of the mission.</p>{references.length ? references.map(([name, value]) => <details key={name}><summary>Decrypt {name}</summary><pre><code>{value}</code></pre></details>) : <p className="muted">No canonical code is required. Validate against the mission’s observable outcome.</p>}<div className="verdicts"><button onClick={() => { setRan(false); setTab('debrief') }}>Needs another run</button><button className="success" onClick={finish}>{completed ? 'Review cleared' : 'Mission cleared'} <Check /></button></div></div>}
+      </section>
+    </div>}
+    {tab === 'debrief' && <div className="content-panel"><div className="panel-label">DEBRIEF // THE REASONING THAT MATTERS</div><Markdown>{lesson.explanation}</Markdown><details><summary>Open all notes and the 100-prompt retrieval bank</summary><Markdown>{lesson.fullReading}</Markdown></details></div>}
+  </div>
+}
+
+function ReviewsView({ pack, save, onMission, onTrack, index }: { pack: TrackPack; save: SaveState; onMission: (lesson: Lesson, mission: Mission) => void; onTrack: (track: TrackMeta) => void; index: ContentIndex }) {
+  const due = dueReviewIds(save)
+  const local = pack.lessons.flatMap((lesson) => lesson.exercises.map((mission) => ({ lesson, mission, id: missionKey(lesson, mission) }))).filter((item) => due.includes(item.id))
+  const remoteTracks = [...new Set(due.map((id) => id.split('/')[0]).filter((id) => id !== pack.id))]
+  return <>
+    <SectionTitle eyebrow="MEMORY MAINTENANCE" title="Review queue" />
+    <div className="review-hero"><BrainCircuit /><div><strong>{due.length}</strong><span>signals need reinforcement</span></div><p>Reviews arrive at growing intervals. A miss is not failure—it is the scheduler finding the exact edge worth rebuilding.</p></div>
+    {remoteTracks.map((id) => { const track = index.tracks.find((item) => item.id === id); return track && <button className="remote-review" key={id} onClick={() => onTrack(track)}>Load {track.name} reviews <ChevronRight /></button> })}
+    <div className="review-list">{local.length ? local.map(({ lesson, mission, id }) => <button key={id} onClick={() => onMission(lesson, mission)}><div><span>STAGE {(save.reviews[id]?.stage ?? 0) + 1} · DUE NOW</span><strong>{compactTitle(lesson.title)} / {mission.id}</strong></div><b>RECALL <ChevronRight /></b></button>) : <div className="empty"><ShieldCheck /><h3>Memory systems nominal</h3><p>No reviews are due in this world. Continue the journey to seed new review missions.</p></div>}</div>
+  </>
+}
+
+function LibraryView({ pack, save, onMission }: { pack: TrackPack; save: SaveState; onMission: (lesson: Lesson, mission: Mission) => void }) {
+  const [selected, setSelected] = useState(pack.lessons[0])
+  const [resources, setResources] = useState<ResourceDoc[]>([])
+  const [manual, setManual] = useState<ResourceDoc | null>(null)
+  useEffect(() => setSelected(pack.lessons[0]), [pack])
+  useEffect(() => { loadResources().then(setResources).catch(console.error) }, [])
+  return <>
+    <SectionTitle eyebrow="KNOWLEDGE VAULT" title={`${pack.name} archive`} />
+    <div className="manual-strip">{resources.map((resource) => <button key={resource.id} className={manual?.id === resource.id ? 'active' : ''} onClick={() => setManual(manual?.id === resource.id ? null : resource)}><BookOpen /> {resource.title}</button>)}</div>
+    {manual ? <section className="content-panel manual"><div className="panel-label">FIELD MANUAL // {manual.title.toUpperCase()}</div><Markdown>{manual.markdown}</Markdown></section> : <div className="library-layout"><aside><input placeholder="Filter archive…" onChange={(event) => { const found = pack.lessons.find((lesson) => lesson.title.toLowerCase().includes(event.target.value.toLowerCase())); if (found) setSelected(found) }} />{pack.lessons.map((lesson) => <button key={lesson.id} className={selected.id === lesson.id ? 'active' : ''} onClick={() => setSelected(lesson)}><span>{String(lesson.order + 1).padStart(2, '0')}</span>{compactTitle(lesson.title)}</button>)}</aside><section className="content-panel"><div className="panel-label">ARCHIVE FILE {String(selected.order + 1).padStart(3, '0')}</div><Markdown>{selected.explanation || selected.briefing}</Markdown><div className="archive-missions"><h3>Practice missions</h3>{selected.exercises.map((mission) => <button key={mission.id} onClick={() => onMission(selected, mission)}><span>{save.completed[missionKey(selected, mission)] ? <Check /> : <Circle />}{mission.id}</span><b>{mission.xp} XP</b></button>)}</div><details><summary>View complete preserved source content</summary><Markdown>{selected.fullReading}</Markdown></details></section></div>}
+  </>
+}
+
+function SettingsView({ save, onSave }: { save: SaveState; onSave: (save: SaveState) => void }) {
+  const input = useRef<HTMLInputElement>(null)
+  function download() {
+    const blob = new Blob([JSON.stringify(save, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const anchor = document.createElement('a'); anchor.href = url; anchor.download = `ipskill-save-${new Date().toISOString().slice(0, 10)}.json`; anchor.click(); URL.revokeObjectURL(url)
+  }
+  function upload(file?: File) {
+    if (!file) return
+    file.text().then((text) => { const parsed = JSON.parse(text) as SaveState; if (parsed.version !== 1) throw new Error('Unsupported save'); onSave({ ...initialSave, ...parsed }); }).catch(() => window.alert('That save file could not be read.'))
+  }
+  return <>
+    <SectionTitle eyebrow="OPERATIVE PROFILE" title="Save data" />
+    <div className="settings-grid"><section className="setting-card"><Save /><h3>Identity & local save</h3><p>Your progress, drafts, streak, XP, and review schedule save automatically in this browser.</p><label>Operative name<input value={save.playerName} maxLength={24} onChange={(event) => onSave({ ...save, playerName: event.target.value || 'Rookie' })} /></label><div className="save-status"><i /> Last activity: {save.lastActive ?? 'Not started'}</div></section><section className="setting-card"><Archive /><h3>Portable backup</h3><p>Move your journey to another browser or keep a checkpoint outside local storage.</p><button className="primary" onClick={download}><Download /> Export save</button><button className="secondary" onClick={() => input.current?.click()}><Import /> Import save</button><input ref={input} type="file" hidden accept="application/json" onChange={(event) => upload(event.target.files?.[0])} /></section><section className="setting-card danger"><RotateCcw /><h3>Restart campaign</h3><p>Erase local progress and begin the entire journey again. Export first if you may want it back.</p><button onClick={() => { if (window.confirm('Erase every IPSKILL save and draft in this browser?')) { localStorage.removeItem('ipskill.save.v1'); onSave({ ...initialSave }) } }}><RotateCcw /> Reset all progress</button></section></div>
+  </>
+}
+
+export default App

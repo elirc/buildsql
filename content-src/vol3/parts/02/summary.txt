@@ -1,0 +1,1 @@
+Eight collections, one question: which one, and how do you know? This sector replaces taste with arithmetic — element moves, rehashes, collisions, cache lines, break-even query counts — and covers the cases where the big-O table is right and the answer is still wrong, starting with LinkedList.

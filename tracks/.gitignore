@@ -1,9 +1,0 @@
-# JS toolchain (restore with `uv run dojo setup typescript`)
-node_modules/
-
-# .NET build output (restore with `uv run dojo setup csharp`)
-bin/
-obj/
-
-# scratch dirs used by `dojo verify` overlays; should never survive a run
-.dojo_verify/

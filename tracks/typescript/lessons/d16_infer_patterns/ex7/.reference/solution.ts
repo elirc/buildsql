@@ -1,7 +1,0 @@
-// d16_infer_patterns / ex7 - reference solution (author only).
-
-export type UnionToIntersection<U> = (U extends unknown ? (arg: U) => void : never) extends (
-  arg: infer I,
-) => void
-  ? I
-  : never;

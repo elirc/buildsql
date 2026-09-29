@@ -1,0 +1,497 @@
+@@@FILE ex1/prompt.md
+## Exercise 1 — the empty window
+
+Edit `ex1/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)` — 500 rows.
+
+Finance wants a payroll sheet where every person can see how far they sit
+from the company mean, without opening a second report. No join, no
+subquery, no `GROUP BY`: one scan, one window.
+
+Illustration of the rule on a four-row toy table (the mean is 80,000):
+
+```
+ id | salary  | company_avg | diff
+----+---------+-------------+-----------
+  1 | 60000.00|    80000.00 | -20000.00
+  2 | 70000.00|    80000.00 | -10000.00
+  3 | 90000.00|    80000.00 |  10000.00
+  4 |100000.00|    80000.00 |  20000.00
+```
+
+Against the real table your query returns all 500 rows, and `company_avg`
+is identical on every one of them.
+
+Columns, in this order: `id`, `name`, `salary`, `company_avg` (the mean
+salary of the whole table, rounded to 2 decimals), `diff` (this person's
+salary minus that mean, rounded to 2 decimals).
+
+**Ordered by `id` ascending.**
+
+```
+uv run dojo test v3a01_window_frames ex1
+```
+@@@FILE ex1/hints.md
+## Hint 1
+
+You need a number computed over every row of the table to appear *beside*
+every row of the table. `GROUP BY` cannot do that — it collapses the rows it
+aggregates. A window function aggregates without collapsing.
+
+## Hint 2
+
+An `OVER` clause with nothing in it is legal, and it means "the frame is the
+entire result set". Here is the same idea used for a count rather than an
+average:
+
+```sql
+SELECT id, name, count(*) OVER () AS staff_total
+FROM staff;
+```
+
+Every row gets 500.
+
+## Hint 3
+
+Two of your output columns need the same window aggregate: one prints it,
+one subtracts it. Writing `avg(salary) OVER ()` twice is fine and costs
+nothing extra — PostgreSQL evaluates identical windows once. `avg` over a
+`numeric` column returns `numeric`, so `round(..., 2)` works directly. The
+decision left to you is whether to round before or after subtracting; the
+prompt asks for the difference of the unrounded values, rounded.
+@@@FILE ex1/importantHints.md
+## Hint 1
+
+Start from the wrong answer. Write this:
+
+```sql
+SELECT id, name, salary, round(avg(salary), 2) FROM staff;
+```
+
+PostgreSQL rejects it: `column "staff.id" must appear in the GROUP BY clause
+or be used in an aggregate function`. That error is the whole lesson. An
+aggregate collapses; you asked for 500 rows and an aggregate at the same
+time. What single keyword tells PostgreSQL "aggregate, but do not collapse"?
+
+## Hint 2
+
+Now consider the other wrong answer — the one that runs:
+
+```sql
+SELECT s.id, s.name, s.salary, a.m
+FROM staff s CROSS JOIN (SELECT avg(salary) AS m FROM staff) a;
+```
+
+That is correct, and it is what people wrote before 8.4. It reads the table
+twice. The window version reads it once and says what it means.
+
+## Hint 3
+
+Think about the shape of the frame rather than the syntax. You want every
+row to see every other row: no partitioning, no ordering, no bounds. There
+is exactly one `OVER` clause that describes that, and it has nothing inside
+the parentheses.
+@@@FILE ex1/solution.sql
+-- v3a01_window_frames / ex1 — every row beside the company mean, one scan.
+SELECT id,
+       name,
+       salary,
+       round(avg(salary) OVER (), 2)          AS company_avg,
+       round(salary - avg(salary) OVER (), 2) AS diff
+FROM staff
+ORDER BY id;
+@@@FILE ex1/expected.sql
+SELECT s.id,
+       s.name,
+       s.salary,
+       round(a.mean, 2)           AS company_avg,
+       round(s.salary - a.mean, 2) AS diff
+FROM staff s
+CROSS JOIN (SELECT avg(salary) AS mean FROM staff) a
+ORDER BY s.id;
+@@@FILE ex2/prompt.md
+## Exercise 2 — partitioning without ordering
+
+Edit `ex2/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`. The five departments hold 138 sales,
+112 engineering, 98 ops, 91 support and 61 finance.
+
+Same sheet as ex1, but the comparison is now against the person's *own*
+department rather than the company. Every row must also carry its
+department's headcount.
+
+Illustration on a toy table with two departments:
+
+```
+ id | department  | salary  | dept_avg | dept_headcount | diff
+----+-------------+---------+----------+----------------+----------
+  1 | finance     |60000.00 | 65000.00 |              2 | -5000.00
+  2 | finance     |70000.00 | 65000.00 |              2 |  5000.00
+  3 | ops         |80000.00 | 90000.00 |              3 |-10000.00
+  4 | ops         |90000.00 | 90000.00 |              3 |     0.00
+  5 | ops         |100000.00| 90000.00 |              3 | 10000.00
+```
+
+Note what the department average is *not*: it does not grow down the
+column. If yours does, you added something to the `OVER` clause that the
+prompt did not ask for.
+
+Against the real table your query returns all 500 rows.
+
+Columns, in this order: `id`, `name`, `department`, `salary`, `dept_avg`
+(mean salary of that person's department, rounded to 2 decimals),
+`dept_headcount` (how many people are in that department), `diff` (salary
+minus the unrounded department mean, rounded to 2 decimals).
+
+**Ordered by `department` ascending, then `id` ascending.**
+
+```
+uv run dojo test v3a01_window_frames ex2
+```
+@@@FILE ex2/hints.md
+## Hint 1
+
+The window from ex1 saw the whole table. This one must see only the rows
+that share a department with the current row. That is the first of the three
+decisions in an `OVER` clause, and it has an obvious name.
+
+## Hint 2
+
+A different example of the same shape — every product beside its category's
+most expensive price:
+
+```sql
+SELECT id, name, category, price,
+       max(price) OVER (PARTITION BY category) AS category_top
+FROM products;
+```
+
+`PARTITION BY` cuts the rows into independent groups. Nothing is sorted and
+nothing accumulates.
+
+## Hint 3
+
+Three of your columns use the same partitioned window with three different
+aggregates: `avg`, `count(*)`, and `avg` again inside a subtraction. Resist
+the urge to add `ORDER BY department` inside the `OVER` — decide first what
+that would do to the numbers, and then confirm it against the illustration
+above.
+@@@FILE ex2/importantHints.md
+## Hint 1
+
+Predict before you type. Here are two clauses that differ by seven
+characters:
+
+```sql
+avg(salary) OVER (PARTITION BY department)
+avg(salary) OVER (PARTITION BY department ORDER BY id)
+```
+
+One of them puts the same number on all 138 sales rows. The other puts a
+different number on each. Which, and why? Answer that and the exercise is
+finished.
+
+## Hint 2
+
+The answer: adding `ORDER BY` to an `OVER` clause does not merely sort — it
+installs the default frame, `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
+ROW`. The window stops being "the whole department" and becomes "the
+department so far", so the second clause is a *running* average. You want
+the first.
+
+## Hint 3
+
+For the ordering of the output itself, the story is different: the `ORDER
+BY` at the end of the statement has nothing to do with any window. Sort the
+result by `department, id` there, and leave every `OVER` clause holding only
+a `PARTITION BY`.
+@@@FILE ex2/solution.sql
+-- v3a01_window_frames / ex2 — per-department stats on every detail row.
+SELECT id,
+       name,
+       department,
+       salary,
+       round(avg(salary) OVER (PARTITION BY department), 2) AS dept_avg,
+       count(*) OVER (PARTITION BY department)              AS dept_headcount,
+       round(salary - avg(salary) OVER (PARTITION BY department), 2) AS diff
+FROM staff
+ORDER BY department, id;
+@@@FILE ex2/expected.sql
+WITH dept AS (
+    SELECT department,
+           avg(salary) AS mean,
+           count(*)    AS headcount
+    FROM staff
+    GROUP BY department
+)
+SELECT s.id,
+       s.name,
+       s.department,
+       s.salary,
+       round(d.mean, 2)            AS dept_avg,
+       d.headcount                 AS dept_headcount,
+       round(s.salary - d.mean, 2) AS diff
+FROM staff s
+JOIN dept d ON d.department = s.department
+ORDER BY s.department, s.id;
+@@@FILE ex3/prompt.md
+## Exercise 3 — ORDER BY installs a frame
+
+Edit `ex3/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 61 people in the
+`finance` department.
+
+Finance is reconstructing how its own payroll grew as it hired. For every
+person, in hire order, the total salary of everyone hired up to and
+including them.
+
+Illustration on five rows, one of which shares a hire date with another:
+
+```
+ id | hired_on   | salary   | running_payroll
+----+------------+----------+----------------
+  7 | 2015-03-02 | 70000.00 |        70000.00
+ 12 | 2016-07-19 | 60000.00 |       130000.00
+  4 | 2016-11-30 | 90000.00 |       220000.00
+ 31 | 2016-11-30 | 50000.00 |       270000.00
+ 22 | 2018-01-05 | 80000.00 |       350000.00
+```
+
+Look at rows 3 and 4. They were hired on the same day, and they still get
+different running totals — because the window's `ORDER BY` breaks the tie
+with `id`, so id 4 is definitively "before" id 31. Your window must do the
+same: **order by `hired_on`, then `id`**. Without the tie-break the answer
+would not be defined.
+
+Columns, in this order: `id`, `name`, `hired_on`, `salary`,
+`running_payroll` (the cumulative salary total, in that order). No rounding
+is needed — the sum of a `numeric(10,2)` column is exact.
+
+**Ordered by `hired_on` ascending, then `id` ascending.** (61 rows.)
+
+```
+uv run dojo test v3a01_window_frames ex3
+```
+@@@FILE ex3/hints.md
+## Hint 1
+
+"Everyone hired up to and including this person" is a description of a
+*frame*: it starts at the beginning of the partition and ends at the current
+row. You do not have to write that frame down — there is a way to get it by
+default.
+
+## Hint 2
+
+A neighbouring example. This is a running count of orders in id order:
+
+```sql
+SELECT id, created_at,
+       count(*) OVER (ORDER BY id) AS orders_so_far
+FROM orders
+WHERE created_at >= '2023-10-01' AND created_at < '2023-10-02';
+```
+
+The `ORDER BY` inside the `OVER` is what makes it cumulative rather than
+constant.
+
+## Hint 3
+
+The window's `ORDER BY` needs two expressions, not one, and the second one
+exists purely to make the first unique. The `WHERE` clause restricting the
+query to finance goes outside the window, where it belongs: `WHERE` runs
+before windowing, so the partition only ever contains finance rows. Whether
+you also repeat the sort in the statement's final `ORDER BY` is up to you —
+but the prompt requires a specific output order, and the window's ordering
+does not guarantee it.
+@@@FILE ex3/importantHints.md
+## Hint 1
+
+Work backwards from the frame instead of forwards from the syntax. Write
+down, in English, which rows the sum for the *third* row of the output is
+allowed to see. Then which rows the fourth row sees. The difference between
+those two sets is one row, always the row you just passed. A frame that
+grows by exactly one row per step is the definition of the default frame.
+
+## Hint 2
+
+Now write the frame explicitly, as if the default did not exist:
+
+```sql
+sum(salary) OVER (ORDER BY hired_on, id
+                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+```
+
+Run it. Then delete the two lines of frame clause and run it again. The
+results are identical here — and they are identical *only* because the
+window's `ORDER BY` is unique. Hold onto that; ex4 is about what happens
+when it is not.
+
+## Hint 3
+
+The remaining decision is where the `finance` filter goes. Inside a subquery
+that the window then runs over, or in a plain `WHERE` on the same `SELECT`?
+Both work, and one of them is three characters. `WHERE` is evaluated before
+window functions, which is exactly why.
+@@@FILE ex3/solution.sql
+-- v3a01_window_frames / ex3 — cumulative finance payroll in hire order.
+SELECT id,
+       name,
+       hired_on,
+       salary,
+       sum(salary) OVER (ORDER BY hired_on, id) AS running_payroll
+FROM staff
+WHERE department = 'finance'
+ORDER BY hired_on, id;
+@@@FILE ex3/expected.sql
+SELECT id,
+       name,
+       hired_on,
+       salary,
+       sum(salary) OVER (ORDER BY hired_on, id
+                         ROWS BETWEEN UNBOUNDED PRECEDING
+                                  AND CURRENT ROW) AS running_payroll
+FROM staff
+WHERE department = 'finance'
+ORDER BY hired_on, id;
+@@@FILE ex4/prompt.md
+## Exercise 4 — ROWS and RANGE disagree
+
+Edit `ex4/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)` — all 500 rows, five departments.
+
+This is the exercise that makes the frame modes concrete. You will produce
+the same running total twice, over a sort key with enormous tie groups, and
+put the two answers side by side.
+
+- `running_range` — `sum(salary)` over a window ordered by `department`
+  **only**, with the default frame. Because the default frame is `RANGE`,
+  every row that ties on `department` is a peer of every other, so all 138
+  sales rows get the *same* number: the total for every department up to and
+  including sales.
+- `running_rows` — `sum(salary)` over a window ordered by `department, id`
+  with an explicit `ROWS UNBOUNDED PRECEDING` frame. That one climbs by one
+  salary per row.
+
+Illustration on six rows in two departments:
+
+```
+ id | department  | salary   | running_range | running_rows
+----+-------------+----------+---------------+-------------
+  3 | engineering | 50000.00 |     180000.00 |     50000.00
+  8 | engineering | 60000.00 |     180000.00 |    110000.00
+ 11 | engineering | 70000.00 |     180000.00 |    180000.00
+  2 | finance     | 40000.00 |     300000.00 |    220000.00
+  5 | finance     | 30000.00 |     300000.00 |    250000.00
+  9 | finance     | 50000.00 |     300000.00 |    300000.00
+```
+
+`running_range` is flat inside a department and jumps at the boundary.
+`running_rows` moves on every row. The last row of each department is the
+one place they agree.
+
+Columns, in this order: `id`, `name`, `department`, `salary`,
+`running_range`, `running_rows`. No rounding.
+
+**Ordered by `department` ascending, then `id` ascending.** (500 rows.)
+
+```
+uv run dojo test v3a01_window_frames ex4
+```
+@@@FILE ex4/hints.md
+## Hint 1
+
+Two windows in one `SELECT` list is ordinary — they do not have to match.
+One of your two windows orders by a column with only five distinct values;
+the other orders by that column plus something unique. Everything else
+follows from that difference.
+
+## Hint 2
+
+The shorthand you need for the second column:
+
+```sql
+sum(x) OVER (ORDER BY a, b ROWS UNBOUNDED PRECEDING)
+```
+
+is exactly `ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. When a frame
+clause names only a starting bound, the end is `CURRENT ROW`.
+
+## Hint 3
+
+For `running_range`, write nothing at all after the `ORDER BY department` —
+the default frame is already `RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT
+ROW`, and under `RANGE`, "current row" means "the last of my peers". You may
+spell it out if you prefer; the decision left to you is whether you trust
+the default enough to rely on it in production code.
+@@@FILE ex4/importantHints.md
+## Hint 1
+
+Answer this before writing anything: under `ORDER BY department` with no
+frame clause, how many *distinct* values can `running_range` take across 500
+rows? There are five departments. The answer is five, and knowing why is
+knowing what a peer is.
+
+## Hint 2
+
+Here is the trap you are being vaccinated against. Suppose you had written
+the second column like this:
+
+```sql
+sum(salary) OVER (ORDER BY department ROWS UNBOUNDED PRECEDING)
+```
+
+It runs. It produces a climbing total. And it is *undefined*: within a
+department, `ROWS` accumulates peers in whatever order the sort happened to
+emit, which PostgreSQL does not promise and which can change when the plan
+changes. The prompt's `running_rows` therefore orders by `department, id` —
+a unique key — which is the only way `ROWS` gives an answer you can put in a
+report.
+
+## Hint 3
+
+If you want to see the two modes without the departments in the way, run
+this on its own first:
+
+```sql
+SELECT department, salary,
+       sum(salary) OVER (ORDER BY department)                    AS by_range,
+       sum(salary) OVER (ORDER BY department, id
+                         ROWS UNBOUNDED PRECEDING)               AS by_rows
+FROM staff
+WHERE department IN ('finance', 'ops')
+ORDER BY department, id;
+```
+
+Then generalise it to all five departments and add the remaining columns.
+@@@FILE ex4/solution.sql
+-- v3a01_window_frames / ex4 — the same running total under RANGE and ROWS.
+SELECT id,
+       name,
+       department,
+       salary,
+       sum(salary) OVER (ORDER BY department)     AS running_range,
+       sum(salary) OVER (ORDER BY department, id
+                         ROWS UNBOUNDED PRECEDING) AS running_rows
+FROM staff
+ORDER BY department, id;
+@@@FILE ex4/expected.sql
+SELECT s.id,
+       s.name,
+       s.department,
+       s.salary,
+       (SELECT sum(x.salary)
+          FROM staff x
+         WHERE x.department <= s.department)               AS running_range,
+       (SELECT sum(x.salary)
+          FROM staff x
+         WHERE (x.department, x.id) <= (s.department, s.id)) AS running_rows
+FROM staff s
+ORDER BY s.department, s.id;

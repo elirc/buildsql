@@ -1,0 +1,534 @@
+@@@FILE ex1/prompt.md
+## Exercise 1 — year to date
+
+Edit `ex1/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)` — 500,000 rows spanning 2022-11-14
+to 2023-11-14. Restrict to `created_at >= '2023-01-01'`, which leaves the
+eleven months January to November 2023.
+
+Finance wants the 2023 monthly series with year-to-date columns beside it:
+how many orders and how much revenue have landed in the year up to and
+including each month.
+
+Roll up to one row per month first — `date_trunc('month', created_at)::date`
+— and window over those eleven rows. Windowing the half-million raw orders
+would produce a running total per *order*, which is a different report.
+
+Illustration on four months:
+
+```
+   month    | orders | revenue    | ytd_orders | ytd_revenue
+------------+--------+------------+------------+-------------
+ 2023-01-01 |  42000 | 42100000.00|      42000 | 42100000.00
+ 2023-02-01 |  38000 | 38200000.00|      80000 | 80300000.00
+ 2023-03-01 |  41000 | 41300000.00|     121000 | 121600000.00
+ 2023-04-01 |  40000 | 40050000.00|     161000 | 161650000.00
+```
+
+Each `ytd_` column on a row equals the previous row's value plus this row's.
+The last row's `ytd_revenue` equals the sum of the whole `revenue` column.
+
+Columns, in this order: `month` (a `date`, the first of the month),
+`orders` (that month's order count), `revenue` (that month's revenue sum),
+`ytd_orders`, `ytd_revenue`. No rounding.
+
+**Ordered by `month` ascending.** (11 rows.)
+
+```
+uv run dojo test v3a03_running_totals ex1
+```
+@@@FILE ex1/hints.md
+## Hint 1
+
+Two stages. The first collapses 500,000 orders into eleven monthly rows; the
+second annotates those eleven rows without collapsing them further. Different
+tools: one is `GROUP BY`, the other is a window.
+
+## Hint 2
+
+Once the monthly rows exist, both new columns are the same construction:
+
+```sql
+sum(revenue) OVER (ORDER BY month) AS ytd_revenue
+```
+
+An `ORDER BY` inside `OVER` and no frame clause gives you "everything from
+the start of the partition through this row", which is the definition of
+year-to-date here.
+
+## Hint 3
+
+`date_trunc('month', created_at)` returns a timestamp; the prompt wants a
+`date`, so cast it. The filter `created_at >= '2023-01-01'` belongs inside
+the aggregating CTE, where it reduces what gets grouped — not outside it,
+where it would have nothing left to do. The decision left to you is whether
+to use a CTE or a subquery in `FROM`; they compile to the same plan.
+@@@FILE ex1/importantHints.md
+## Hint 1
+
+Check the arithmetic of the last row before anything else. `ytd_revenue` on
+the November row must equal `sum(revenue)` over your entire result. If it is
+smaller, your window has a frame you did not intend; if it is larger, your
+filter differs between the two stages.
+
+## Hint 2
+
+Here is the version that produces 460,000 rows instead of 11:
+
+```sql
+SELECT date_trunc('month', created_at)::date AS month, total,
+       sum(total) OVER (ORDER BY created_at) AS ytd_revenue
+FROM orders
+WHERE created_at >= '2023-01-01';
+```
+
+It is a running total, and it is per order. Adding `DISTINCT` to it would
+produce something that looks like the answer and is not. The grain of the
+report is "one row per month", and the query has to say so with a
+`GROUP BY` before any window runs.
+
+## Hint 3
+
+One type note that catches people: `count(*)` is `bigint`, and `sum` of a
+`bigint` is `numeric`. So `ytd_orders` comes back as a numeric value rather
+than an integer. That is correct and expected — do not cast it back, and do
+not be surprised when the column prints without a decimal point but is not
+an integer type.
+@@@FILE ex1/solution.sql
+-- v3a03_running_totals / ex1 — 2023 monthly series with year-to-date columns.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)   AS orders,
+           sum(total) AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1
+)
+SELECT month,
+       orders,
+       revenue,
+       sum(orders)  OVER (ORDER BY month) AS ytd_orders,
+       sum(revenue) OVER (ORDER BY month) AS ytd_revenue
+FROM monthly
+ORDER BY month;
+@@@FILE ex1/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)   AS orders,
+           sum(total) AS revenue
+    FROM orders
+    WHERE created_at >= '2023-01-01'
+    GROUP BY 1
+)
+SELECT m.month,
+       m.orders,
+       m.revenue,
+       (SELECT sum(x.orders)  FROM monthly x WHERE x.month <= m.month) AS ytd_orders,
+       (SELECT sum(x.revenue) FROM monthly x WHERE x.month <= m.month) AS ytd_revenue
+FROM monthly m
+ORDER BY m.month;
+@@@FILE ex2/prompt.md
+## Exercise 2 — an accumulation that resets
+
+Edit `ex2/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)` — 500 rows, hire dates spread over ten
+years, five departments.
+
+HR wants a growth curve per department: for each department and each year in
+which it hired anybody, how many people it hired that year and how many it
+had accumulated by the end of that year. The accumulation must restart at
+every department — engineering's first year must not inherit anything from
+the department that sorts before it.
+
+Take the year with `extract(year FROM hired_on)::int`.
+
+Illustration across two departments:
+
+```
+ department  | hire_year | hires | cumulative_headcount
+-------------+-----------+-------+---------------------
+ engineering |      2016 |     4 |                    4
+ engineering |      2017 |     7 |                   11
+ engineering |      2019 |     3 |                   14
+ finance     |      2015 |     2 |                    2
+ finance     |      2018 |     5 |                    7
+```
+
+Two things to read off it. The finance rows start from 2 rather than
+continuing engineering's 14 — that is the partition doing its job. And 2018
+follows 2015 directly: years in which a department hired nobody produce no
+row at all, and for a cumulative count that is harmless.
+
+Columns, in this order: `department`, `hire_year` (an integer), `hires`
+(people hired by that department that year), `cumulative_headcount` (the
+running total of `hires` within the department, in year order).
+
+**Ordered by `department` ascending, then `hire_year` ascending.**
+
+```
+uv run dojo test v3a03_running_totals ex2
+```
+@@@FILE ex2/hints.md
+## Hint 1
+
+The grain of this report is (department, year). Get there with a `GROUP BY`
+of two columns, then add one window column on top of the grouped rows.
+
+## Hint 2
+
+The window needs both of its first two clauses:
+
+```sql
+sum(n) OVER (PARTITION BY g ORDER BY t)
+```
+
+`PARTITION BY` decides where the accumulation resets; `ORDER BY` decides the
+direction it accumulates in. Drop either and the column means something
+else.
+
+## Hint 3
+
+`extract(year FROM hired_on)` returns a `numeric` in PostgreSQL 14 and
+later, so cast it to `int` for a clean output column — and use the same
+expression in the `GROUP BY` (or group by the ordinal position). The
+decision left to you: group by the expression or by its output alias?
+PostgreSQL allows the alias in `GROUP BY`, which is convenient and slightly
+non-portable.
+@@@FILE ex2/importantHints.md
+## Hint 1
+
+Predict a property you can check instantly: for each department, the final
+`cumulative_headcount` must equal that department's headcount — 138 for
+sales, 112 engineering, 98 ops, 91 support, 61 finance. Run your query, look
+at the last row of each department, and you will know whether the partition
+is right before you read anything else.
+
+## Hint 2
+
+Here is the failure this exercise exists for:
+
+```sql
+sum(hires) OVER (ORDER BY department, hire_year)
+```
+
+It runs, it climbs, and the last row prints 500. Every department after the
+first starts from wherever the previous one ended. The numbers are plausible
+enough to survive a glance, which is what makes this bug dangerous rather
+than annoying.
+
+## Hint 3
+
+A subtler point, worth thinking about even though it does not change your
+answer here: a year in which a department hired nobody is simply absent.
+For a *cumulative* count that is fine — the curve is still correct at every
+point it reports. It would not be fine for a "hires per year" chart, which
+would draw a straight line across the gap, and it would not be fine for a
+moving average. That is what exercise 6's calendar spine is for.
+@@@FILE ex2/solution.sql
+-- v3a03_running_totals / ex2 — departmental headcount curves, resetting per group.
+WITH hires AS (
+    SELECT department,
+           extract(year FROM hired_on)::int AS hire_year,
+           count(*)                         AS hires
+    FROM staff
+    GROUP BY 1, 2
+)
+SELECT department,
+       hire_year,
+       hires,
+       sum(hires) OVER (PARTITION BY department
+                        ORDER BY hire_year) AS cumulative_headcount
+FROM hires
+ORDER BY department, hire_year;
+@@@FILE ex2/expected.sql
+WITH hires AS (
+    SELECT department,
+           extract(year FROM hired_on)::int AS hire_year,
+           count(*)                         AS hires
+    FROM staff
+    GROUP BY 1, 2
+)
+SELECT h.department,
+       h.hire_year,
+       h.hires,
+       (SELECT sum(x.hires)
+          FROM hires x
+         WHERE x.department = h.department
+           AND x.hire_year <= h.hire_year) AS cumulative_headcount
+FROM hires h
+ORDER BY h.department, h.hire_year;
+@@@FILE ex3/prompt.md
+## Exercise 3 — high-water marks
+
+Edit `ex3/solution.sql`.
+
+Works against `events(id bigint, customer_id int, event_type text, payload
+jsonb, ts timestamptz)` — 3,000,000 rows, one per second, `ts` running from
+2023-10-11 to 2023-11-14. Restrict to `event_type = 'purchase'`.
+
+Growth wants the daily purchase series with three cumulative columns, all
+from the same window: the total so far, the best single day seen so far, and
+how many days of data have been reported so far.
+
+Roll up to one row per day with `date_trunc('day', ts)::date`.
+
+Illustration on five days:
+
+```
+    day     | purchases | purchases_so_far | best_day_so_far | days_so_far
+------------+-----------+------------------+-----------------+------------
+ 2023-10-11 |      4100 |             4100 |            4100 |           1
+ 2023-10-12 |      6600 |            10700 |            6600 |           2
+ 2023-10-13 |      5200 |            15900 |            6600 |           3
+ 2023-10-14 |      6900 |            22800 |            6900 |           4
+ 2023-10-15 |      3300 |            26100 |            6900 |           5
+```
+
+`best_day_so_far` never goes down — that is what makes it a high-water mark,
+and it is also the cheapest way to check your own answer. If your column
+dips anywhere, the window is wrong.
+
+Columns, in this order: `day` (a `date`), `purchases` (that day's purchase
+count), `purchases_so_far`, `best_day_so_far`, `days_so_far`.
+
+**Ordered by `day` ascending.**
+
+```
+uv run dojo test v3a03_running_totals ex3
+```
+@@@FILE ex3/hints.md
+## Hint 1
+
+Three cumulative columns, one window. The only thing that changes between
+them is which aggregate you wrap around the frame.
+
+## Hint 2
+
+Every aggregate becomes cumulative over an ordered window:
+
+```sql
+sum(x)   OVER (ORDER BY d)   -- total so far
+min(x)   OVER (ORDER BY d)   -- worst so far
+count(*) OVER (ORDER BY d)   -- rows so far
+bool_or(flag) OVER (ORDER BY d) -- has it happened yet
+```
+
+Nothing about the frame changes; the meaning comes entirely from the
+function.
+
+## Hint 3
+
+Declare the window once with a `WINDOW` clause and use it three times — it
+makes the query shorter and makes it structurally impossible for the three
+frames to drift apart. The decision left to you: `count(*)` or
+`count(purchases)`? On this rollup there are no NULLs, so they agree; say
+which one you mean anyway.
+@@@FILE ex3/importantHints.md
+## Hint 1
+
+The `events` table has three million rows and no index on `event_type`, so
+this query will do a sequential scan. That is fine and expected — but it
+means you want exactly one scan. Aggregate to days inside a CTE, and let the
+windows run over the thirty-odd rows that come out. If you find yourself
+windowing over raw events, stop.
+
+## Hint 2
+
+Verify with an invariant rather than by eye. Three of them are available:
+`purchases_so_far` on the last row equals `sum(purchases)` over the whole
+result; `best_day_so_far` on the last row equals `max(purchases)`;
+`days_so_far` on the last row equals the number of rows. Check all three and
+the query is proved.
+
+## Hint 3
+
+One thing to notice about `best_day_so_far`: because the frame only grows,
+PostgreSQL cannot compute this one incrementally the way it does a sum —
+there is no way to un-maximise a value when a row leaves the frame. Here the
+frame never shrinks, so it does not matter. It starts to matter with a
+sliding `max` over a wide frame, and knowing that now will save you a
+mystifying slow query later.
+@@@FILE ex3/solution.sql
+-- v3a03_running_totals / ex3 — daily purchases with three cumulative columns.
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day,
+           count(*)                    AS purchases
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY 1
+)
+SELECT day,
+       purchases,
+       sum(purchases) OVER w AS purchases_so_far,
+       max(purchases) OVER w AS best_day_so_far,
+       count(*)       OVER w AS days_so_far
+FROM daily
+WINDOW w AS (ORDER BY day)
+ORDER BY day;
+@@@FILE ex3/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day,
+           count(*)                    AS purchases
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY 1
+)
+SELECT d.day,
+       d.purchases,
+       (SELECT sum(x.purchases) FROM daily x WHERE x.day <= d.day) AS purchases_so_far,
+       (SELECT max(x.purchases) FROM daily x WHERE x.day <= d.day) AS best_day_so_far,
+       (SELECT count(*)         FROM daily x WHERE x.day <= d.day) AS days_so_far
+FROM daily d
+ORDER BY d.day;
+@@@FILE ex4/prompt.md
+## Exercise 4 — a trailing average, honestly
+
+Edit `ex4/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, October 2023 only
+(`created_at >= '2023-10-01' AND created_at < '2023-11-01'`), rolled up to
+one row per day. October has orders on all 31 days.
+
+Analytics wants a seven-day trailing average of daily revenue — and they
+want to stop publishing the first six values, which are averages of one to
+six days wearing a seven-day label.
+
+Three columns do that: the naive average, the number of rows the frame
+actually contained, and the honest average that is NULL until the frame is
+full.
+
+Illustration on the first eight days:
+
+```
+    day     | revenue  | ma7_naive | days_in_window | ma7
+------------+----------+-----------+----------------+----------
+ 2023-10-01 | 41500.00 |  41500.00 |              1 |
+ 2023-10-02 | 38200.00 |  39850.00 |              2 |
+ 2023-10-03 | 44100.00 |  41266.67 |              3 |
+ 2023-10-04 | 39900.00 |  40925.00 |              4 |
+ 2023-10-05 | 42800.00 |  41300.00 |              5 |
+ 2023-10-06 | 40100.00 |  41100.00 |              6 |
+ 2023-10-07 | 44900.00 |  41642.86 |              7 | 41642.86
+ 2023-10-08 | 39500.00 |  41357.14 |              7 | 41357.14
+```
+
+`ma7` is empty until the seventh row and equals `ma7_naive` from then on.
+Note that `days_in_window` stops at 7 and stays there — the frame slides, it
+does not keep growing.
+
+Columns, in this order: `day` (a `date`), `revenue`, `ma7_naive` (the mean
+over the current day and the six before it, rounded to 2 decimals),
+`days_in_window` (how many rows that frame held), `ma7` (the same average,
+but NULL unless `days_in_window` is exactly 7).
+
+**Ordered by `day` ascending.** (31 rows.)
+
+```
+uv run dojo test v3a03_running_totals ex4
+```
+@@@FILE ex4/hints.md
+## Hint 1
+
+All three derived columns look at the same seven rows. Write that frame
+once, name it, and use it three times.
+
+## Hint 2
+
+A frame with both bounds specified, and a count over it:
+
+```sql
+avg(x)   OVER (ORDER BY d ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+count(*) OVER (ORDER BY d ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+```
+
+The `count` is how you find out whether the `avg` had three rows to work
+with or fewer.
+
+## Hint 3
+
+For the third column, a `CASE` may wrap a window function — that is legal
+and ordinary, because `CASE` is evaluated in the select list, after
+windowing. What is *not* legal is filtering on a window function in `WHERE`.
+With no `ELSE`, a `CASE` yields NULL, which is exactly the value the prompt
+wants for the first six rows.
+@@@FILE ex4/importantHints.md
+## Hint 1
+
+Count the rows in the frame by hand for the first three days. Day 1: the
+frame is "six before me and me", but there is nothing before me, so it holds
+one row. Day 2: two rows. Day 7: seven. Day 8: still seven, because the
+oldest day has slid out of the back. A frame that specifies both bounds
+slides; a frame with `UNBOUNDED PRECEDING` grows forever. Know which one you
+have written.
+
+## Hint 2
+
+The temptation is to filter the partial rows away:
+
+```sql
+... WHERE count(*) OVER w = 7
+```
+
+PostgreSQL rejects it — window functions cannot appear in `WHERE`. The
+options are a `CASE` in the select list (which keeps all 31 rows, as the
+prompt wants) or a second query level with the filter outside (which would
+give you 25 rows, which the prompt does not want). Read the required row
+count before choosing.
+
+## Hint 3
+
+`avg` over a `numeric` column returns `numeric`, so `round(..., 2)` applies
+directly. If you find yourself needing `::numeric`, something upstream has
+become a float — check that you did not divide by an integer literal
+somewhere, or use `extract(epoch ...)` on a timestamp.
+@@@FILE ex4/solution.sql
+-- v3a03_running_totals / ex4 — a seven-day trailing mean that admits its edges.
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1
+)
+SELECT day,
+       revenue,
+       round(avg(revenue) OVER w, 2) AS ma7_naive,
+       count(*) OVER w               AS days_in_window,
+       CASE WHEN count(*) OVER w = 7
+            THEN round(avg(revenue) OVER w, 2)
+       END                           AS ma7
+FROM daily
+WINDOW w AS (ORDER BY day ROWS BETWEEN 6 PRECEDING AND CURRENT ROW)
+ORDER BY day;
+@@@FILE ex4/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1
+)
+SELECT d.day,
+       d.revenue,
+       (SELECT round(avg(x.revenue), 2)
+          FROM daily x
+         WHERE x.day BETWEEN d.day - 6 AND d.day) AS ma7_naive,
+       (SELECT count(*)
+          FROM daily x
+         WHERE x.day BETWEEN d.day - 6 AND d.day) AS days_in_window,
+       CASE WHEN (SELECT count(*)
+                    FROM daily x
+                   WHERE x.day BETWEEN d.day - 6 AND d.day) = 7
+            THEN (SELECT round(avg(x.revenue), 2)
+                    FROM daily x
+                   WHERE x.day BETWEEN d.day - 6 AND d.day)
+       END                                        AS ma7
+FROM daily d
+ORDER BY d.day;

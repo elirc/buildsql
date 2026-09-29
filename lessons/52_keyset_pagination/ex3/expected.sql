@@ -1,5 +1,0 @@
-SELECT id, ts
-FROM events
-ORDER BY ts DESC
-OFFSET 200000
-LIMIT 20;

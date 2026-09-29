@@ -1,1 +1,0 @@
--- 41_gin_fulltext/ex3: your CREATE INDEX here (see README.md)

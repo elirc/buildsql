@@ -1,0 +1,862 @@
+@@@FILE ex5/prompt.md
+## Exercise 5 — WITH TIES
+
+Edit `ex5/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 61 people in
+`finance`.
+
+Compensation wants "the top five, plus anyone tied with the fifth". They are
+comparing salary *bands*, not exact salaries: band each person with
+`round(salary, -4)` — a negative scale, so the salary rounds to the nearest
+ten thousand — and take the top five rows by band, keeping every row that
+ties with the fifth.
+
+Use `FETCH FIRST 5 ROWS WITH TIES` rather than a ranking function. It is
+standard SQL, PostgreSQL has had it since version 13, and it works on the
+whole result — which is exactly the situation here.
+
+Illustration with bands holding 3, 4 and 2 people:
+
+```
+ id | salary    | band
+----+-----------+-------
+  9 | 121000.00 | 120000
+  3 | 118000.00 | 120000
+ 17 | 124000.00 | 120000
+  4 | 112000.00 | 110000
+ 22 | 108000.00 | 110000
+ 31 | 107000.00 | 110000
+  8 | 113000.00 | 110000
+```
+
+Seven rows for a "top five": the fifth row sits in band 110000, so the other
+two members of that band come with it. The band below is excluded entirely.
+
+One trap to plan for. `WITH TIES` decides what counts as a tie using the
+**entire** `ORDER BY`, so adding `, id` to it would make every row unique
+and silently turn the clause into a plain `LIMIT 5`. The required output
+ordering therefore cannot live in the same `ORDER BY` — wrap the limited
+query and sort outside it.
+
+Columns, in this order: `id`, `name`, `salary`, `band`.
+
+**Ordered by `band` descending, then `id` ascending.**
+
+```
+uv run dojo test v3a02_ranking_top_n ex5
+```
+@@@FILE ex5/hints.md
+## Hint 1
+
+Two different orderings are in play: the one that decides *which* rows are
+kept, and the one that decides how the kept rows are displayed. They cannot
+be the same clause here. That tells you the query has two levels.
+
+## Hint 2
+
+The syntax, and the wrapper:
+
+```sql
+SELECT * FROM (
+    SELECT id, name, price
+    FROM products
+    ORDER BY price DESC
+    FETCH FIRST 3 ROWS WITH TIES
+) t
+ORDER BY price DESC, id;
+```
+
+The inner `ORDER BY` is part of the `FETCH` semantics. The outer one is
+presentation.
+
+## Hint 3
+
+`round(salary, -4)` is the band, and it must appear both in the inner
+`ORDER BY` (so `WITH TIES` compares bands) and in the output. You can select
+it as an alias inside and order by that alias outside. The decision left to
+you: does the inner `ORDER BY` reference the alias or repeat the expression?
+Either works — PostgreSQL allows output aliases in `ORDER BY`.
+@@@FILE ex5/importantHints.md
+## Hint 1
+
+Reason about the boundary. Sort the 61 people by band descending and count
+down to the fifth row. Whatever band that row is in, every member of it is
+in your answer, and nobody from any lower band is. Now say that as a
+predicate — "band greater than or equal to the fifth row's band" — and you
+have a description you can check your output against.
+
+## Hint 2
+
+Here is the version that quietly does the wrong thing:
+
+```sql
+SELECT id, name, salary, round(salary, -4) AS band
+FROM staff
+WHERE department = 'finance'
+ORDER BY band DESC, id
+FETCH FIRST 5 ROWS WITH TIES;
+```
+
+It returns exactly five rows, always. Because `id` is unique, no two rows
+tie on the full `ORDER BY`, so there are no ties to keep. It is `LIMIT 5`
+with extra words.
+
+## Hint 3
+
+If you want to prove your answer independently, write the ranking version
+too — `rank() OVER (ORDER BY band DESC)` in a subquery, filtered to `<= 5` —
+and compare the row sets. They agree, always, and knowing *why* they agree
+is worth more than either query: `rank <= 5` keeps a band exactly when that
+band starts at position five or earlier.
+@@@FILE ex5/solution.sql
+-- v3a02_ranking_top_n / ex5 — top five salary bands, ties kept, via WITH TIES.
+SELECT id,
+       name,
+       salary,
+       band
+FROM (
+    SELECT id,
+           name,
+           salary,
+           round(salary, -4) AS band
+    FROM staff
+    WHERE department = 'finance'
+    ORDER BY band DESC
+    FETCH FIRST 5 ROWS WITH TIES
+) top_bands
+ORDER BY band DESC, id;
+@@@FILE ex5/expected.sql
+WITH fin AS (
+    SELECT id, name, salary, round(salary, -4) AS band
+    FROM staff
+    WHERE department = 'finance'
+),
+ranked AS (
+    SELECT id, name, salary, band,
+           rank() OVER (ORDER BY band DESC) AS rnk
+    FROM fin
+)
+SELECT id, name, salary, band
+FROM ranked
+WHERE rnk <= 5
+ORDER BY band DESC, id;
+@@@FILE ex6/prompt.md
+## Exercise 6 — NULLs in the ordering
+
+Edit `ex6/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, joined to itself: a person's *direct
+reports* are the rows whose `manager_id` equals that person's `id`. Restrict
+the people being ranked to the 61 in `finance`; their reports may sit in any
+department.
+
+HR wants finance staff ranked by how well paid their direct reports are.
+Most of them manage nobody, so their average report salary is NULL — and
+NULL is not zero, it is "no such number".
+
+The point of the exercise is what a ranking does with that NULL. In
+PostgreSQL, `ORDER BY x DESC` puts NULLs **first** by default, so under a
+naive ranking every leaf employee ties for first place, above everyone who
+actually manages people. `NULLS LAST` moves them to the bottom, where a
+report about managers wants them.
+
+Illustration on six finance staff:
+
+```
+ id | reports_avg | rank_nulls_last | rank_default
+----+-------------+-----------------+-------------
+  2 |             |               5 |            1
+  7 |             |               5 |            1
+ 11 |             |               5 |            1
+  4 |    98000.00 |               1 |            4
+  9 |    91000.00 |               2 |            5
+ 13 |    77500.00 |               3 |            6
+```
+
+Three NULL rows tie in both columns — all NULLs are peers of each other.
+Under `rank_nulls_last` they share rank 5, one past the three real managers;
+under `rank_default` they share rank 1 and push the real managers down to 4.
+
+Columns, in this order: `id`, `name`, `reports_avg` (the mean salary of this
+person's direct reports, rounded to 2 decimals, NULL when they have none),
+`rank_nulls_last` (`rank` over `reports_avg` descending with `NULLS LAST`),
+`rank_default` (`rank` over `reports_avg` descending, defaults untouched).
+
+**Ordered by `id` ascending.** (61 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n ex6
+```
+@@@FILE ex6/hints.md
+## Hint 1
+
+Two stages again. First one row per finance person carrying an average that
+may be NULL — that is a self-join that must not drop the people with no
+reports. Then two rankings of the same column, differing only in where the
+NULLs go.
+
+## Hint 2
+
+`NULLS FIRST` and `NULLS LAST` are part of `ORDER BY`, and an `ORDER BY`
+inside an `OVER` clause accepts them just like the statement-level one:
+
+```sql
+rank() OVER (ORDER BY last_login DESC NULLS LAST)
+```
+
+The defaults are: `ASC` implies `NULLS LAST`, `DESC` implies `NULLS FIRST`.
+
+## Hint 3
+
+For the average itself: `LEFT JOIN staff r ON r.manager_id = m.id`, then
+`avg(r.salary)` — `avg` over a group whose only row is NULL-padded returns
+NULL, which is exactly the value you want, with no `CASE` required. The
+decision left to you is where the `finance` filter goes: it applies to the
+*manager* side of the join, not the report side.
+@@@FILE ex6/importantHints.md
+## Hint 1
+
+Before writing SQL, answer this: in `ORDER BY x DESC`, is NULL treated as
+bigger than everything or smaller than everything? PostgreSQL's answer is
+neither — NULLs are simply placed at one end, and for `DESC` that end is the
+front. The reasoning is consistency: `DESC` reverses the whole ordering
+including where the NULLs sit.
+
+## Hint 2
+
+Here is the bug this exercise vaccinates against, as it appears in a real
+report:
+
+```
+ name          | reports_avg | rank
+---------------+-------------+------
+ Karen Welch   |             |    1
+ Tomas Vega    |             |    1
+ Priya Patel   |   142000.00 |   38
+```
+
+The CEO-adjacent manager with the best-paid team is 38th, behind
+thirty-seven people who manage nobody. Nothing is broken; the ordering did
+what it says. One clause fixes it.
+
+## Hint 3
+
+Both ranking columns come from the same expression with different
+`ORDER BY` tails, so this is a good place to write two windows out in full
+rather than trying to share one. Note also that `rank` — not `row_number` —
+is required, because every NULL row must get the *same* number. `row_number`
+would number them arbitrarily and the result would not be reproducible.
+@@@FILE ex6/solution.sql
+-- v3a02_ranking_top_n / ex6 — ranking a column that contains NULLs, both ways.
+WITH managers AS (
+    SELECT m.id,
+           m.name,
+           round(avg(r.salary), 2) AS reports_avg
+    FROM staff m
+    LEFT JOIN staff r ON r.manager_id = m.id
+    WHERE m.department = 'finance'
+    GROUP BY m.id, m.name
+)
+SELECT id,
+       name,
+       reports_avg,
+       rank() OVER (ORDER BY reports_avg DESC NULLS LAST) AS rank_nulls_last,
+       rank() OVER (ORDER BY reports_avg DESC)            AS rank_default
+FROM managers
+ORDER BY id;
+@@@FILE ex6/expected.sql
+WITH managers AS (
+    SELECT m.id,
+           m.name,
+           round(avg(r.salary), 2) AS reports_avg
+    FROM staff m
+    LEFT JOIN staff r ON r.manager_id = m.id
+    WHERE m.department = 'finance'
+    GROUP BY m.id, m.name
+),
+null_count AS (
+    SELECT count(*) AS n FROM managers WHERE reports_avg IS NULL
+)
+SELECT g.id,
+       g.name,
+       g.reports_avg,
+       CASE WHEN g.reports_avg IS NULL
+            THEN (SELECT count(*) + 1 FROM managers x WHERE x.reports_avg IS NOT NULL)
+            ELSE (SELECT count(*) + 1 FROM managers x WHERE x.reports_avg > g.reports_avg)
+       END AS rank_nulls_last,
+       CASE WHEN g.reports_avg IS NULL
+            THEN 1::bigint
+            ELSE n.n + 1 + (SELECT count(*) FROM managers y WHERE y.reports_avg > g.reports_avg)
+       END AS rank_default
+FROM managers g
+CROSS JOIN null_count n
+ORDER BY g.id;
+@@@FILE ex7/prompt.md
+## Exercise 7 — top-N with LATERAL
+
+Edit `ex7/solution.sql`.
+
+Works against `products(id int, name text, category text, price
+numeric(10,2), description text, attributes jsonb)` — 10,000 rows across the
+six categories `books`, `clothing`, `electronics`, `food`, `garden`, `toys`.
+
+The same question as ex3 — top N per group — written the other way. Instead
+of numbering all ten thousand rows and throwing away 99.9% of them, run a
+tiny `ORDER BY ... LIMIT 2` once per category and keep everything it
+returns.
+
+That requires a subquery that can see the outer row's `category`, which
+ordinary subqueries in `FROM` cannot do. `LATERAL` is the keyword that
+grants it.
+
+Illustration of the shape (two categories shown):
+
+```
+ category    | id   | name              | price
+-------------+------+-------------------+--------
+ books       | 8123 | Vega Atlas 447    | 499.62
+ books       |  912 | Nova Compendium 8 | 498.80
+ clothing    | 4410 | Aero Jacket 220   | 499.80
+ clothing    | 7731 | Lumen Scarf 55    | 499.04
+```
+
+Exactly two rows per category, so twelve rows in total. Ties in `price` are
+broken by the lower `id`, and that tie-break belongs in the inner
+`ORDER BY`, where it decides membership — not only in the outer one, where
+it would decide display order after the damage was done.
+
+Columns, in this order: `category`, `id`, `name`, `price`.
+
+**Ordered by `category` ascending, then `price` descending, then `id`
+ascending.** (12 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n ex7
+```
+@@@FILE ex7/hints.md
+## Hint 1
+
+You need a list of the six categories, and then, for each of them, a
+two-row query. The second part is an ordinary `ORDER BY ... LIMIT 2` — the
+only new thing is letting it refer to the category it is being run for.
+
+## Hint 2
+
+`LATERAL` in miniature:
+
+```sql
+SELECT c.id, o.id AS order_id, o.total
+FROM customers c
+CROSS JOIN LATERAL (
+    SELECT id, total FROM orders
+    WHERE customer_id = c.id
+    ORDER BY total DESC, id
+    LIMIT 1
+) o
+WHERE c.id <= 5;
+```
+
+Without `LATERAL`, `WHERE customer_id = c.id` is an error: the subquery
+cannot see `c`.
+
+## Hint 3
+
+Get the six categories with `SELECT DISTINCT category FROM products`. Then
+`CROSS JOIN LATERAL (...) p`. The inner query's `LIMIT 2` is what makes this
+"top 2 per group" without any ranking function at all. The decision left to
+you is whether to use `CROSS JOIN LATERAL` or the comma form (`,
+LATERAL (...)`) — they mean the same thing, and one of them is easier to
+misread as an accidental cartesian product.
+@@@FILE ex7/importantHints.md
+## Hint 1
+
+Think about the plan before the syntax. The window version sorts 10,000
+rows once. This version runs six small queries. Which is faster depends on
+how many groups there are and whether an index can serve each group's top
+rows — and in this dataset there is no index on `(category, price)`, so each
+of the six inner queries scans the table. That makes this the *slower* shape
+here, and writing it anyway is the point: you are learning the tool, not
+optimising this particular query.
+
+## Hint 2
+
+The most common `LATERAL` failure is forgetting the keyword:
+
+```sql
+FROM (SELECT DISTINCT category FROM products) c
+CROSS JOIN (SELECT id, name, price FROM products
+            WHERE category = c.category ORDER BY price DESC LIMIT 2) p
+```
+
+PostgreSQL: `invalid reference to FROM-clause entry for table "c"`. Items in
+a `FROM` list cannot see each other unless the later one is marked
+`LATERAL`. That error message is the definition of the keyword.
+
+## Hint 3
+
+Second most common failure: putting the tie-break only in the outer
+`ORDER BY`. The inner `LIMIT 2` has already chosen which two rows survive;
+sorting them afterwards cannot undo an arbitrary choice. Any `ORDER BY` that
+feeds a `LIMIT` needs to be total.
+@@@FILE ex7/solution.sql
+-- v3a02_ranking_top_n / ex7 — top two per category as a per-group LIMIT.
+SELECT c.category,
+       p.id,
+       p.name,
+       p.price
+FROM (SELECT DISTINCT category FROM products) c
+CROSS JOIN LATERAL (
+    SELECT id, name, price
+    FROM products
+    WHERE category = c.category
+    ORDER BY price DESC, id
+    LIMIT 2
+) p
+ORDER BY c.category, p.price DESC, p.id;
+@@@FILE ex7/expected.sql
+WITH ranked AS (
+    SELECT category,
+           id,
+           name,
+           price,
+           row_number() OVER (PARTITION BY category
+                              ORDER BY price DESC, id) AS rn
+    FROM products
+)
+SELECT category, id, name, price
+FROM ranked
+WHERE rn <= 2
+ORDER BY category, price DESC, id;
+@@@FILE ex8/prompt.md
+## Exercise 8 — ranking plus a join back
+
+Edit `ex8/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, joined to itself for the manager's
+name. `manager_id` is NULL for exactly one person — the CEO — and she is
+comfortably in her department's top three, so an inner self-join would
+silently drop a row you need.
+
+The compensation committee wants, for each department, the three
+highest-paid people, each with their manager's name and their salary
+expressed as a percentage of the best salary in that department. The top
+earner in each department therefore shows `100.00`.
+
+Illustration for one department:
+
+```
+ department | dept_rank | id | name        | manager      | salary    | pct_of_dept_top
+------------+-----------+----+-------------+--------------+-----------+----------------
+ finance    |         1 | 12 | Ana Duarte  | Karen Welch  | 190000.00 |          100.00
+ finance    |         2 |  4 | Rob Chen    | Ana Duarte   | 175000.00 |           92.11
+ finance    |         3 | 31 | Mia Okafor  | Ana Duarte   | 175000.00 |           92.11
+```
+
+Two windows are needed and they are used differently: one produces the rank
+that decides which rows survive, the other produces a per-department maximum
+that stays as data. Exactly three rows per department, ties broken by the
+lower `id`.
+
+Columns, in this order: `department`, `dept_rank`, `id`, `name`, `manager`
+(the manager's name, NULL where there is none), `salary`,
+`pct_of_dept_top` (100 × salary ÷ the department's highest salary, rounded
+to 2 decimals).
+
+**Ordered by `department` ascending, then `dept_rank` ascending.**
+(15 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n ex8
+```
+@@@FILE ex8/hints.md
+## Hint 1
+
+Three things happen at three different levels: compute two window columns
+over all 500 rows, join to get a name, and filter on the rank. Decide the
+order of those three before you type, and the query writes itself.
+
+## Hint 2
+
+Two windows over the same partition, one ordered and one not:
+
+```sql
+row_number() OVER (PARTITION BY department ORDER BY salary DESC, id) AS dept_rank,
+max(salary)  OVER (PARTITION BY department)                          AS dept_top
+```
+
+Adding `ORDER BY` to the second would turn the department maximum into a
+running maximum — the same trap as ex2's headcount.
+
+## Hint 3
+
+The join to the manager must be a `LEFT JOIN`, because one of your fifteen
+rows has no manager. Whether you join before or after filtering to the top
+three is a genuine choice: filtering first joins 15 rows instead of 500, but
+both are correct, and on 500 rows neither is measurably faster. Say which
+one you chose and why.
+@@@FILE ex8/importantHints.md
+## Hint 1
+
+Predict two properties of the correct answer and check them first: exactly
+15 rows, and exactly 5 rows showing `100.00`. If the second number is
+wrong, your `max` window is not partitioned by department. If it is 15, your
+`max` window is the department maximum of a single-row frame — you gave it
+an `ORDER BY`.
+
+## Hint 2
+
+Now the row that catches people. The CEO has `manager_id IS NULL`. With an
+inner self-join, her row vanishes and one department returns two rows
+instead of three — and nobody notices, because 14 rows looks a lot like 15.
+Count.
+
+## Hint 3
+
+There is a subtle ordering question in the percentage. `round(100 * salary /
+dept_top, 2)` divides two `numeric` values, which stays `numeric`, so no
+cast is needed. But `round(100 * (salary / dept_top), 2)` and `round((100 *
+salary) / dept_top, 2)` can differ in the last decimal place because
+`numeric` division truncates to a limited scale before the multiply in one
+of them. Multiply first.
+@@@FILE ex8/solution.sql
+-- v3a02_ranking_top_n / ex8 — top three per department, with manager and share.
+WITH ranked AS (
+    SELECT s.id,
+           s.name,
+           s.department,
+           s.salary,
+           s.manager_id,
+           row_number() OVER (PARTITION BY s.department
+                              ORDER BY s.salary DESC, s.id) AS dept_rank,
+           max(s.salary) OVER (PARTITION BY s.department)    AS dept_top
+    FROM staff s
+)
+SELECT r.department,
+       r.dept_rank,
+       r.id,
+       r.name,
+       m.name AS manager,
+       r.salary,
+       round(100 * r.salary / r.dept_top, 2) AS pct_of_dept_top
+FROM ranked r
+LEFT JOIN staff m ON m.id = r.manager_id
+WHERE r.dept_rank <= 3
+ORDER BY r.department, r.dept_rank;
+@@@FILE ex8/expected.sql
+WITH positioned AS (
+    SELECT s.id,
+           s.name,
+           s.department,
+           s.salary,
+           s.manager_id,
+           (SELECT count(*) + 1
+              FROM staff x
+             WHERE x.department = s.department
+               AND (x.salary > s.salary
+                    OR (x.salary = s.salary AND x.id < s.id))) AS dept_rank
+    FROM staff s
+)
+SELECT p.department,
+       p.dept_rank,
+       p.id,
+       p.name,
+       (SELECT m.name FROM staff m WHERE m.id = p.manager_id) AS manager,
+       p.salary,
+       round(100 * p.salary
+             / (SELECT max(t.salary) FROM staff t
+                 WHERE t.department = p.department), 2) AS pct_of_dept_top
+FROM positioned p
+WHERE p.dept_rank <= 3
+ORDER BY p.department, p.dept_rank;
+@@@FILE challenge/prompt.md
+## Challenge — best sellers per category
+
+Edit `challenge/solution.sql`.
+
+Works against `order_items(id int, order_id int, product_id int, quantity
+int, price numeric(10,2))` — 1,000,000 rows — joined to `products(id int,
+name text, category text, price numeric(10,2), description text, attributes
+jsonb)`.
+
+Merchandising wants the best-selling products in each category by **units
+shipped** — the sum of `quantity` across all line items for that product —
+keeping the top three ranks and everybody tied with them. 300 products have
+never been ordered; they cannot be best sellers, and an inner join removes
+them for free.
+
+Three stages, and the order matters: aggregate to one row per product,
+rank within category, filter the rank.
+
+Illustration for one category where two products tie at rank 2:
+
+```
+ category    | rnk | product_id | name              | units
+-------------+-----+------------+-------------------+-------
+ garden      |   1 |       6612 | Nova Trowel 118   |   641
+ garden      |   2 |        204 | Aero Planter 77   |   630
+ garden      |   2 |       8890 | Lumen Hose 412    |   630
+ garden      |   4 |       1177 | Vega Rake 39      |   628
+```
+
+That is the *ranking*, not the answer. Rank 2 is shared, so rank 3 never
+occurs and the next product is rank 4 — which fails `rnk <= 3`. This
+category therefore contributes three rows: ranks 1, 2 and 2. A category with
+three products tied at rank 1 would contribute more. Filter on the rank
+value and let the row count fall out.
+
+Columns, in this order: `category`, `rnk` (rank within the category by
+`units` descending, ties shared), `product_id`, `name`, `units`. Keep every
+row whose `rnk` is 3 or less.
+
+**Ordered by `category` ascending, then `rnk` ascending, then `product_id`
+ascending.**
+
+```
+uv run dojo test v3a02_ranking_top_n challenge
+```
+@@@FILE challenge/hints.md
+## Hint 1
+
+Write the three stages down as three names before you write any SQL:
+`units` (one row per product), `ranked` (the same rows plus a rank within
+category), and the final select that filters. Chained CTEs let you keep
+those names in the query.
+
+## Hint 2
+
+The first stage needs the category, which lives in `products`, and the
+quantity, which lives in `order_items`:
+
+```sql
+SELECT p.category, p.id AS product_id, p.name, sum(oi.quantity) AS units
+FROM order_items oi
+JOIN products p ON p.id = oi.product_id
+GROUP BY p.category, p.id, p.name
+```
+
+Grouping by `p.id` and also selecting `p.name` is fine — `id` is the primary
+key, so `name` is functionally dependent on it — but listing both is
+clearer and portable.
+
+## Hint 3
+
+The ranking window partitions by `category` and orders by `units`
+descending. "Ties kept" selects the function for you. The decision left to
+you is where the filter goes: `WHERE rnk <= 3` cannot sit in the same
+`SELECT` as the window, so it needs the third stage — and it must not be
+pushed into the aggregation stage, where `units` exists but `rnk` does not.
+@@@FILE challenge/importantHints.md
+## Hint 1
+
+Attack it from the wrong answer. Someone writes:
+
+```sql
+SELECT p.category, p.id, p.name, sum(oi.quantity) AS units
+FROM order_items oi JOIN products p ON p.id = oi.product_id
+GROUP BY p.category, p.id, p.name
+ORDER BY p.category, units DESC
+LIMIT 3;
+```
+
+Three rows in total, all from whichever category sorts first. `LIMIT` knows
+nothing about groups. That is the gap window functions exist to fill.
+
+## Hint 2
+
+The second wrong answer is subtler: ranking before aggregating.
+
+```sql
+rank() OVER (PARTITION BY p.category ORDER BY oi.quantity DESC)
+```
+
+That ranks *line items*, not products — a single order of five units would
+outrank a product with six hundred spread over two hundred orders. The
+window must run over the aggregated rows, which means either a separate CTE
+or an `ORDER BY sum(oi.quantity) DESC` inside the window of a grouped query.
+Both work; the CTE is easier to read and easier to test.
+
+## Hint 3
+
+If you want to prove the rank independently, remember the identity from
+sector v3a01_window_frames: a row's rank equals the number of rows through
+the end of its peer group, minus the size of its peer group, plus one. In
+window terms that is `count(*) OVER (... RANGE BETWEEN UNBOUNDED PRECEDING
+AND CURRENT ROW) - count(*) OVER (... RANGE BETWEEN CURRENT ROW AND CURRENT
+ROW) + 1`. Same number, computed from frames rather than from a named
+function.
+@@@FILE challenge/solution.sql
+-- v3a02_ranking_top_n / challenge — best sellers per category, ties kept.
+WITH units AS (
+    SELECT p.category,
+           p.id   AS product_id,
+           p.name,
+           sum(oi.quantity) AS units
+    FROM order_items oi
+    JOIN products p ON p.id = oi.product_id
+    GROUP BY p.category, p.id, p.name
+),
+ranked AS (
+    SELECT category,
+           product_id,
+           name,
+           units,
+           rank() OVER (PARTITION BY category ORDER BY units DESC) AS rnk
+    FROM units
+)
+SELECT category,
+       rnk,
+       product_id,
+       name,
+       units
+FROM ranked
+WHERE rnk <= 3
+ORDER BY category, rnk, product_id;
+@@@FILE challenge/expected.sql
+WITH units AS (
+    SELECT p.category,
+           p.id   AS product_id,
+           p.name,
+           sum(oi.quantity) AS units
+    FROM order_items oi
+    JOIN products p ON p.id = oi.product_id
+    GROUP BY p.category, p.id, p.name
+),
+ranked AS (
+    SELECT category,
+           product_id,
+           name,
+           units,
+           count(*) OVER (PARTITION BY category ORDER BY units DESC
+                          RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+         - count(*) OVER (PARTITION BY category ORDER BY units DESC
+                          RANGE BETWEEN CURRENT ROW AND CURRENT ROW)
+         + 1 AS rnk
+    FROM units
+)
+SELECT category,
+       rnk,
+       product_id,
+       name,
+       units
+FROM ranked
+WHERE rnk <= 3
+ORDER BY category, rnk, product_id;
+@@@FILE review1/prompt.md
+## Spaced review
+
+Edit `review1/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 61 people in
+`finance`.
+
+Compensation wants each person labelled with which salary *band* they are
+in, counting bands from the top: everyone in the highest band is in band 1,
+everyone in the next distinct band down is in band 2, and so on with no
+gaps — even when a band holds seven people.
+
+Band the salary with `round(salary, -4)`.
+
+Illustration:
+
+```
+ id | salary    | band   | band_rank
+----+-----------+--------+----------
+  9 | 121000.00 | 120000 |         1
+ 17 | 124000.00 | 120000 |         1
+  4 | 112000.00 | 110000 |         2
+ 22 | 108000.00 | 110000 |         2
+  8 | 113000.00 | 110000 |         2
+  3 |  97000.00 | 100000 |         3
+```
+
+Note that `band_rank` counts *bands*, not people: after the three people in
+band 110000, the next value is 3, not 6. Only one of the three ranking
+functions behaves this way.
+
+Columns, in this order: `id`, `name`, `salary`, `band`, `band_rank`.
+
+**Ordered by `band` descending, then `id` ascending.** (61 rows.)
+
+```
+uv run dojo test v3a02_ranking_top_n review1
+```
+@@@FILE review1/hints.md
+## Hint 1
+
+Read the requirement one more time: "the next distinct band down is band 2".
+Distinct values, numbered consecutively. That sentence names a function.
+
+## Hint 2
+
+The distinguishing test, on scores 10, 10, 9:
+
+```
+row_number -> 1, 2, 3
+rank       -> 1, 1, 3
+dense_rank -> 1, 1, 2
+```
+
+Only one of them gives the third row a 2.
+
+## Hint 3
+
+The window orders by the band expression, descending. You may write
+`round(salary, -4)` twice — once in the select list as `band`, once in the
+window's `ORDER BY` — or order by the output alias; PostgreSQL accepts the
+alias in a statement-level `ORDER BY` but **not** inside an `OVER` clause,
+so the window needs the expression itself. That is the decision this
+exercise leaves you.
+@@@FILE review1/importantHints.md
+## Hint 1
+
+Check your answer's shape before its values. `max(band_rank)` in your result
+must equal the number of distinct bands in finance — nothing more. If your
+maximum is close to 61, you numbered people; if it skips values, you counted
+people ahead of each row rather than bands.
+
+## Hint 2
+
+A different route to the same answer, useful as a cross-check: collect the
+distinct bands into a CTE, count how many are strictly greater than this
+row's band, add one. That is the definition of `dense_rank` written out
+longhand, and running both should give you identical columns.
+
+## Hint 3
+
+One thing worth noticing on the way out: `dense_rank` over a *banded*
+expression is doing something you could also do with arithmetic —
+`(max_band - band) / 10000 + 1` — and the two disagree the moment a band is
+empty. `dense_rank` numbers the bands that exist; the arithmetic numbers the
+bands that could exist. Which one is right depends on the question, and
+knowing that they differ is the review.
+@@@FILE review1/solution.sql
+-- v3a02_ranking_top_n / review1 — which salary band, counting from the top.
+SELECT id,
+       name,
+       salary,
+       round(salary, -4) AS band,
+       dense_rank() OVER (ORDER BY round(salary, -4) DESC) AS band_rank
+FROM staff
+WHERE department = 'finance'
+ORDER BY band DESC, id;
+@@@FILE review1/expected.sql
+WITH fin AS (
+    SELECT id, name, salary, round(salary, -4) AS band
+    FROM staff
+    WHERE department = 'finance'
+),
+bands AS (
+    SELECT DISTINCT band FROM fin
+)
+SELECT f.id,
+       f.name,
+       f.salary,
+       f.band,
+       (SELECT count(*) + 1 FROM bands b WHERE b.band > f.band) AS band_rank
+FROM fin f
+ORDER BY f.band DESC, f.id;

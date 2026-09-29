@@ -1,0 +1,37 @@
+{
+  "name": "ipskill",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.16 <23"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5187 --strictPort",
+    "start": "vite --host 127.0.0.1 --port 5187 --strictPort",
+    "validate": "node scripts/validate-content.mjs",
+    "check": "npm run validate && npm test && npm run build",
+    "build": "tsc -b && vite build",
+    "test": "vitest run --maxWorkers=1 --no-file-parallelism",
+    "preview": "vite preview --host 127.0.0.1 --port 5187 --strictPort"
+  },
+  "dependencies": {
+    "lucide-react": "0.542.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.9.1",
+    "@testing-library/react": "16.3.3",
+    "@types/node": "22.20.1",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.7",
+    "@vitejs/plugin-react": "5.2.0",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.3",
+    "vite": "7.3.6",
+    "vitest": "3.2.7"
+  }
+}

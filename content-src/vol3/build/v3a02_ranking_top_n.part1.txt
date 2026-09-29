@@ -1,0 +1,726 @@
+@@@META
+{
+  "slug": "v3a02_ranking_top_n",
+  "title": "V3·A2 — Ranking and top-N per group",
+  "summary": "Three ranking functions that differ only in how they treat ties, and the one query shape — window in a subquery, filter outside — that answers \"the top N of every group\". Along the way: why an unstable ORDER BY makes row_number a coin flip, and what WITH TIES does that LIMIT cannot."
+}
+@@@FILE briefing.md
+# V3·A2 — Ranking and top-N per group
+
+"The three best-selling products in each category" is the most requested
+report in commercial SQL and the one most often written wrongly. `GROUP BY`
+cannot express it, because it collapses each category to one row and you
+wanted three. `LIMIT` cannot express it, because `LIMIT` applies to the
+whole result and not to each group. `DISTINCT ON` gets you exactly one row
+per group, which is the special case where N is 1.
+
+The general answer is a ranking window function, computed in a subquery,
+filtered outside it. That is the shape this sector drills until it is
+automatic — and then it makes you decide the question everybody skips: what
+should happen to the ties?
+
+Sector v3a01_window_frames is assumed knowledge here. Ranking functions
+ignore the frame entirely — `rank()` looks at the whole partition and the
+ordering, and no frame clause changes its answer — but everything about
+partitions, peers and the difference between a window's `ORDER BY` and the
+statement's `ORDER BY` carries straight over.
+
+## Concept
+
+Three functions, one difference:
+
+```sql
+row_number() OVER (ORDER BY score DESC)  -- 1,2,3,4,5  always distinct
+rank()       OVER (ORDER BY score DESC)  -- 1,2,2,4,5  gaps after ties
+dense_rank() OVER (ORDER BY score DESC)  -- 1,2,2,3,4  no gaps
+```
+
+On five rows scoring 90, 80, 80, 70, 60:
+
+```
+ score | row_number | rank | dense_rank
+-------+------------+------+-----------
+    90 |          1 |    1 |          1
+    80 |          2 |    2 |          2
+    80 |          3 |    2 |          2
+    70 |          4 |    4 |          3
+    60 |          5 |    5 |          4
+```
+
+Read the three columns as three different sentences. `row_number` is "your
+position in a queue". `rank` is "how many people are strictly ahead of you,
+plus one" — Olympic ranking, where two silvers mean no bronze.
+`dense_rank` is "how many distinct values are ahead of you, plus one" — it
+numbers the *values*, not the rows.
+
+The consequential difference is in the middle column. `row_number` gave the
+two tied rows different numbers, 2 and 3, and nothing in the query says
+which of them gets 2. Ranking functions are computed after the window's
+sort, and the sort does not promise anything about rows it cannot
+distinguish. So:
+
+> `row_number()` over a non-unique `ORDER BY` is non-deterministic.
+
+The fix is one clause: put something unique in the window's ordering.
+
+```sql
+row_number() OVER (ORDER BY score DESC, id)   -- defined, reproducible
+```
+
+This is not pedantry. A "top 10 customers" dashboard whose tenth row changes
+between refreshes, with no data change, is the classic production bug this
+causes, and it is invisible in testing because most orderings do not tie.
+
+## Top-N per group
+
+The shape:
+
+```sql
+SELECT category, name, price, rn
+FROM (
+    SELECT category, name, price,
+           row_number() OVER (PARTITION BY category
+                              ORDER BY price DESC, id) AS rn
+    FROM products
+) ranked
+WHERE rn <= 3
+ORDER BY category, rn;
+```
+
+The nesting is not stylistic. A window function is evaluated after `WHERE`
+and after `GROUP BY`, so `WHERE row_number() OVER (...) <= 3` is a plain
+syntax error — the value does not exist yet at the time `WHERE` runs. The
+subquery (or a CTE, identically) creates a stage where the number is an
+ordinary column, and the filter goes there.
+
+## Which function for a top-N?
+
+This is a product decision disguised as a syntax choice.
+
+- `row_number() <= 3` always returns exactly three rows per group. If two
+  products tie for third place, one of them is silently dropped, and which
+  one is arbitrary unless your ordering is unique.
+- `rank() <= 3` returns three rows *or more*: everybody tied for third stays.
+  A group can return four rows, or twelve.
+- `dense_rank() <= 3` returns "everything in the top three price levels",
+  which for tied-heavy data can be a very large set.
+
+None is correct in general. What is incorrect is not knowing which one you
+chose. When a stakeholder says "top three", ask them what happens when
+there is a tie for third; if they have no opinion, `row_number` with a
+documented tie-break is the answer that at least behaves the same way twice.
+
+PostgreSQL also has a non-window spelling for the whole-result case:
+
+```sql
+SELECT id, name, price FROM products
+ORDER BY price DESC
+FETCH FIRST 5 ROWS WITH TIES;
+```
+
+`WITH TIES` keeps every row that ties with the last one *on the full
+`ORDER BY`* — which means adding a unique tie-break column to that
+`ORDER BY` disables it completely. It is standard SQL, it arrived in
+PostgreSQL 13, and it works only on the whole result, never per group.
+
+## The other shape: LATERAL
+
+```sql
+SELECT c.category, p.id, p.name, p.price
+FROM (SELECT DISTINCT category FROM products) c
+CROSS JOIN LATERAL (
+    SELECT id, name, price FROM products
+    WHERE category = c.category
+    ORDER BY price DESC, id
+    LIMIT 2
+) p;
+```
+
+Same answer, different plan. The window version sorts every row of the table
+once. The `LATERAL` version runs a small query per group, which is a loss
+when there are thousands of groups and a large win when there are six groups
+and an index that can serve each `LIMIT 2` from the top of a btree. Sector
+48 introduced `LATERAL`; sector v3a08_window_vs_groupby is where the choice
+between shapes gets its own vocabulary.
+
+## Exercise 1 — the three functions, side by side
+
+Order counts for twenty customers, numbered three ways at once, including a
+customer with no orders at all.
+
+## Exercise 2 — ranking inside partitions
+
+Every member of staff with their position within their own department and
+the size of that department.
+
+## Exercise 3 — the canonical top-N
+
+The three highest-paid people in each of the five departments, via a window
+in a subquery and a filter outside it.
+
+## Exercise 4 — keeping the ties
+
+The most-reviewed products, where third place is shared and everybody who
+shares it stays in the result.
+
+## Exercise 5 — WITH TIES
+
+The top salary bands in finance, using `FETCH FIRST ... WITH TIES` rather
+than a window — and seeing what a unique tie-break would do to it.
+
+## Exercise 6 — NULLs in the ordering
+
+Ranking managers by the average salary of their reports, where people with
+no reports have no average at all, ranked both ways.
+
+## Exercise 7 — top-N with LATERAL
+
+The two most expensive products in each category, written as a per-group
+`LIMIT` instead of a window.
+
+## Exercise 8 — ranking plus a join back
+
+The top three earners per department, each with their manager's name and
+their salary as a percentage of their department's best.
+
+## Challenge — best sellers per category
+
+The top three products per category by units sold, ties at third place
+kept, joined across `order_items` and `products`.
+
+## Spaced review
+
+`review1/`: which salary band each member of the finance team sits in,
+counting bands from the top — `dense_rank` doing the thing only
+`dense_rank` does.
+@@@FILE explanation.md
+# Reading - sql/v3a02_ranking_top_n
+
+Three functions and one query shape. The functions are easy; the shape is
+the thing worth drilling, and the ties are the thing worth arguing about.
+
+## Notes
+
+**Ranking functions ignore the frame.** `rank()`, `dense_rank()` and
+`row_number()` look at the partition and its ordering, never at the frame
+clause. Writing `rank() OVER (ORDER BY x ROWS BETWEEN 1 PRECEDING AND
+CURRENT ROW)` is legal and the frame is ignored. That is a genuine
+difference from `sum` or `last_value`, and it is why this sector's exercises
+never mention frames.
+
+**`row_number` is only deterministic if the ordering is.** Two rows that tie
+on every `ORDER BY` expression are peers, and their relative order is
+undefined. `rank` and `dense_rank` are immune — peers get equal ranks by
+definition — which makes them, perversely, the safer default when you have
+not thought about tie-breaks. If you want distinct numbers, earn them with a
+unique sort key.
+
+**`WHERE` cannot see a window function.** Clause evaluation order is `FROM`,
+`WHERE`, `GROUP BY`, `HAVING`, window functions, `SELECT`, `DISTINCT`,
+`ORDER BY`, `LIMIT`. Windows are computed near the end, so filtering on one
+requires a second query level: a subquery, a CTE, or a lateral. There is no
+alternative spelling and no flag that changes it.
+
+**Ties are a specification question.** `row_number() <= 3` gives exactly
+three rows and silently drops a tied fourth. `rank() <= 3` keeps every tied
+row and can return any number. `dense_rank() <= 3` keeps the top three
+*values*, which on coarse data can be most of the table. Choose out loud.
+
+**`FETCH FIRST n ROWS WITH TIES` is a whole-result tool.** It cannot be
+partitioned, and its notion of a tie is "equal on the entire `ORDER BY`", so
+a unique tie-break column silently reduces it to `LIMIT`. Use it for
+"top 10 overall"; reach for a window the moment the word "each" appears in
+the requirement.
+
+**NULLs sort last in `ASC` and first in `DESC`, by default.** In a ranking
+window that means an unknown value can rank first, which is almost never
+what a report wants. `ORDER BY x DESC NULLS LAST` inside the `OVER` fixes
+it. All NULLs are peers of each other, so they share a rank.
+
+**A ranking window can order by an aggregate.** In a query that already has
+a `GROUP BY`, the window runs *after* grouping, so `rank() OVER (ORDER BY
+count(*) DESC)` ranks the groups. The reverse is not allowed: an aggregate
+cannot take a window function as its argument, because the window's input is
+the aggregate's output. When the two stages confuse you, split them into a
+CTE and the confusion disappears with them.
+
+**Filtering on a rank is a barrier the planner cannot cross.** `WHERE rn <=
+3` sits above the `WindowAgg` node and can never be pushed below it: the
+rank does not exist yet down there, and removing rows would change the ranks
+that survive. A predicate on a *partitioning* column is the exception — it
+can move, because deleting whole partitions leaves the surviving partitions'
+ranks untouched. That single exception is worth remembering when a top-N
+query over a large table is slow: filtering to the partitions you care about
+is free, filtering on the rank is not.
+
+**`percent_rank`, `cume_dist` and `ntile` are ranking-adjacent, and they are
+sector v3a07_percentiles_ntile's subject.** Mentioned here only so you know
+where they live.
+
+## ex1 — the three functions, side by side
+
+The customer with zero orders is the row to check. A `LEFT JOIN` plus
+`count(o.id)` gives 0; `count(*)` would give 1, which would then be ranked
+above real customers.
+
+## ex2 — ranking inside partitions
+
+`PARTITION BY department ORDER BY salary DESC` restarts the numbering at
+every department. The classic mistake is forgetting the partition and
+producing a company-wide rank that looks plausible in the first department
+and absurd in the last.
+
+## ex3 — the canonical top-N
+
+The shape. If you tried `WHERE rn <= 3` in the same `SELECT` that computes
+`rn`, PostgreSQL told you the column does not exist — that error is the
+lesson, not an obstacle to it.
+
+## ex4 — keeping the ties
+
+Review counts tie constantly, so `rank() <= 3` returns more than three
+products. The exercise is over when you can predict, before running it,
+whether your result will have three rows or seven.
+
+## ex5 — WITH TIES
+
+Banding the salary manufactures the ties that make `WITH TIES` visible. Note
+what happens if you add `, id` to that `ORDER BY`: the ties vanish and the
+clause degenerates into `LIMIT 5`. The outer `ORDER BY` for presentation
+therefore has to live in a wrapper query.
+
+## ex6 — NULLs in the ordering
+
+Managers with no direct reports have no average report salary. Under the
+default `DESC` ordering they rank *first*, above everybody who actually
+manages people. `NULLS LAST` is the fix, and comparing the two columns side
+by side is the point.
+
+## ex7 — top-N with LATERAL
+
+Same answer as ex3's shape, computed by running a tiny `ORDER BY ... LIMIT`
+once per category. Six categories, six small sorts, versus one sort of ten
+thousand rows.
+
+## ex8 — ranking plus a join back
+
+Two things at once: a rank that decides which rows survive, and a
+whole-partition aggregate that turns a salary into a percentage. Both are
+windows; only one of them is used as a filter.
+
+## challenge — best sellers per category
+
+Aggregate first (units per product), then rank within category, then filter.
+Three stages, and getting them in the wrong order is the only way to fail
+this one.
+
+## review1 — dense_rank
+
+"Which band from the top" is a question about distinct values, and
+`dense_rank` is the only one of the three that answers it.
+
+## Further reading
+
+- [Window Functions](https://www.postgresql.org/docs/16/functions-window.html) — the table defining `row_number`, `rank`, `dense_rank` and the note that they ignore the frame clause.
+- [SELECT — LIMIT and OFFSET / FETCH](https://www.postgresql.org/docs/16/sql-select.html#SQL-LIMIT) — the `FETCH FIRST ... WITH TIES` syntax and its exact tie definition.
+- [SELECT — ORDER BY](https://www.postgresql.org/docs/16/sql-select.html#SQL-ORDERBY) — `NULLS FIRST`/`NULLS LAST` and the defaults that surprise people in `DESC` orderings.
+- [Window Function Processing](https://www.postgresql.org/docs/16/queries-table-expressions.html#QUERIES-WINDOW) — where the standard states that window functions run after `WHERE` and `GROUP BY`, which is why top-N needs a subquery.
+- [LATERAL subqueries](https://www.postgresql.org/docs/16/queries-table-expressions.html#QUERIES-LATERAL) — the per-group `LIMIT` shape from ex7.
+@@@FILE fullReadme.md
+# V3·A2 — Ranking and top-N per group
+
+"Top three per category" is the report every analyst is asked for and the
+one SQL beginners cannot write, because none of the tools they know applies.
+This sector fixes that, and then makes the tie question explicit.
+
+## Concept
+
+### The three functions
+
+```sql
+SELECT name, score,
+       row_number() OVER w AS rn,
+       rank()       OVER w AS rnk,
+       dense_rank() OVER w AS drnk
+FROM contestants
+WINDOW w AS (ORDER BY score DESC)
+ORDER BY score DESC;
+```
+
+```
+ name  | score | rn | rnk | drnk
+-------+-------+----+-----+-----
+ ana   |    90 |  1 |   1 |    1
+ bo    |    80 |  2 |   2 |    2
+ cai   |    80 |  3 |   2 |    2
+ dee   |    70 |  4 |   4 |    3
+```
+
+- `row_number` — a queue position. Always 1..n, always distinct.
+- `rank` — competition ranking. Ties share, and the next rank skips.
+- `dense_rank` — numbers the distinct values, not the rows.
+
+All three ignore the frame clause. All three are computed after the window
+sort, so all three see peers; only `row_number` has to break them, and it
+breaks them arbitrarily.
+
+### The top-N shape
+
+```sql
+WITH ranked AS (
+    SELECT department, id, name, salary,
+           row_number() OVER (PARTITION BY department
+                              ORDER BY salary DESC, id) AS dept_rank
+    FROM staff
+)
+SELECT department, dept_rank, id, name, salary
+FROM ranked
+WHERE dept_rank <= 3
+ORDER BY department, dept_rank;
+```
+
+Two levels, always. The window is computed in the inner query; the filter
+lives in the outer one. This is forced by clause evaluation order, not by
+taste.
+
+### The tie policy, made explicit
+
+Suppose a department's salaries are 200k, 180k, 180k, 150k.
+
+```sql
+WHERE row_number(...) <= 3   -- 200, 180, 180  (3 rows; which 180 is 2nd is arbitrary
+                             --                 unless the ORDER BY is unique)
+WHERE rank(...)       <= 3   -- 200, 180, 180  (3 rows here; 4 if there were three 180s)
+WHERE dense_rank(...) <= 3   -- 200, 180, 180, 150  (4 rows: three distinct values plus ties)
+```
+
+Write the policy in the query and the argument happens at review time
+instead of at incident time.
+
+### WITH TIES
+
+```sql
+SELECT id, name, salary FROM staff
+ORDER BY salary DESC
+FETCH FIRST 10 ROWS WITH TIES;
+```
+
+Standard SQL, PostgreSQL 13 and later, whole-result only. Its tie test uses
+the complete `ORDER BY`, so `ORDER BY salary DESC, id` makes it behave
+exactly like `LIMIT 10`. If you need a stable presentation order *and*
+`WITH TIES`, select from it:
+
+```sql
+SELECT * FROM (
+    SELECT id, name, salary FROM staff
+    ORDER BY salary DESC
+    FETCH FIRST 10 ROWS WITH TIES
+) t
+ORDER BY salary DESC, id;
+```
+
+### LATERAL
+
+```sql
+SELECT c.category, p.id, p.name, p.price
+FROM (SELECT DISTINCT category FROM products) c
+CROSS JOIN LATERAL (
+    SELECT id, name, price
+    FROM products
+    WHERE category = c.category
+    ORDER BY price DESC, id
+    LIMIT 2
+) p
+ORDER BY c.category, p.price DESC, p.id;
+```
+
+`LATERAL` lets the inner query reference `c.category`. Each group costs one
+small sort or one index descent; the window version costs one big sort. Few
+groups plus a supporting index favours `LATERAL`; many groups favours the
+window.
+
+## Worked example — the bug that only appears in production
+
+```sql
+SELECT id, name, total
+FROM (
+    SELECT id, name, total,
+           row_number() OVER (ORDER BY total DESC) AS rn
+    FROM big_orders
+) t
+WHERE rn <= 10;
+```
+
+Two orders tie at the tenth-largest total. Which one appears is decided by
+the sort's internal ordering of equal keys, which depends on the plan, which
+depends on the statistics, which change when autovacuum runs. The dashboard
+"flickers". The fix is one word:
+
+```sql
+row_number() OVER (ORDER BY total DESC, id)
+```
+
+The general rule: any query whose result depends on the relative order of
+rows your `ORDER BY` cannot distinguish is a query with an undefined answer.
+`LIMIT` without a unique sort, `DISTINCT ON` without a full ordering, and
+`row_number` over ties are the same bug wearing three costumes.
+
+## Worked example — ranking groups, not rows
+
+A frequent requirement is "rank the categories by how much they sold". The
+thing being ranked is a group, so the window runs over post-aggregation
+rows:
+
+```sql
+SELECT p.category,
+       sum(oi.quantity) AS units,
+       rank() OVER (ORDER BY sum(oi.quantity) DESC) AS units_rank
+FROM order_items oi
+JOIN products p ON p.id = oi.product_id
+GROUP BY p.category
+ORDER BY units_rank;
+```
+
+`sum(oi.quantity)` appears twice: once as an output column and once as the
+window's ordering expression. That is legal and it is not evaluated twice —
+window functions see the rows the `GROUP BY` produced, so the sum is already
+a column by the time the window looks at it. What is *not* legal is the
+mirror image, `sum(rank() OVER (...))`: an aggregate cannot consume a window
+function, because the window runs later.
+
+If reading that makes you hesitate, split it:
+
+```sql
+WITH cat AS (
+    SELECT p.category, sum(oi.quantity) AS units
+    FROM order_items oi JOIN products p ON p.id = oi.product_id
+    GROUP BY p.category
+)
+SELECT category, units, rank() OVER (ORDER BY units DESC) AS units_rank
+FROM cat ORDER BY units_rank;
+```
+
+Identical plan, identical result, and the two stages are named.
+
+## Common mistakes
+
+- **`WHERE rn <= 3` in the same `SELECT` that computes `rn`.** Not allowed —
+  windows run after `WHERE`. Nest it.
+- **Forgetting `PARTITION BY`.** A company-wide rank filtered to `<= 3`
+  returns three rows in total, not three per department. The output row
+  count is the giveaway: 3 instead of 15.
+- **`row_number` where the requirement said "including ties".** Silent data
+  loss, one row at a time.
+- **`rank` where the requirement said "exactly three".** Silent row-count
+  inflation, which breaks downstream code expecting a fixed shape.
+- **Ranking on an aggregate you have not computed yet.** `rank() OVER
+  (ORDER BY count(*) DESC)` inside a `GROUP BY` query is legal — the window
+  sees post-aggregation rows — but `rank() OVER (ORDER BY sum(quantity))`
+  in a query with no `GROUP BY` is not what you meant. Aggregate in a CTE
+  first if the two stages confuse you.
+- **NULLs first in a `DESC` ranking.** The default puts unknowns at the top.
+  Say `NULLS LAST` when NULL means "none", which it usually does.
+- **`WITH TIES` with a unique `ORDER BY`.** Degenerates to `LIMIT`, silently.
+
+## The interview answer
+
+> *How do you get the top three rows per group?*
+
+A ranking window function in a subquery, filtered outside it, because window
+functions are evaluated after `WHERE`. `row_number() OVER (PARTITION BY g
+ORDER BY sort_key DESC, unique_id)` then `WHERE rn <= 3`. The tie-break
+column matters: without it, `row_number` is non-deterministic among equal
+sort keys. If the requirement is "including anyone tied for third", swap
+`row_number` for `rank`, and be aware the group can then return more than
+three rows. On a table with few groups and a supporting index, a `LATERAL`
+per-group `LIMIT` can beat the window because it never sorts the whole
+table.
+
+That answer covers shape, correctness and performance in four sentences,
+which is the shape of a good answer.
+
+## Check yourself
+
+1. Give the output of all three functions for the scores 10, 10, 9, 8, 8, 7.
+2. Which of the three ranking functions is affected by the frame clause?
+3. Why is `WHERE row_number() OVER (...) = 1` a syntax error?
+4. What makes `row_number` non-deterministic, and what fixes it?
+5. `rank() <= 3` on a group with values 5, 5, 5, 4 — how many rows come back?
+6. Same group, `dense_rank() <= 3` — how many rows?
+7. When does `FETCH FIRST 5 ROWS WITH TIES` behave identically to `LIMIT 5`?
+8. Can `WITH TIES` produce a top-N *per group*?
+9. Where do NULLs sort by default in `ORDER BY x DESC`, and what does that
+   do to a ranking?
+10. Write the top-2-per-category query twice: once with a window, once with
+    `LATERAL`.
+11. Under what conditions is the `LATERAL` version faster?
+12. What is the row count of a "top 3 per department" query over five
+    departments, using `row_number`? Using `rank`?
+13. How do you rank on an aggregate — say, customers by their order count?
+14. Why do `rank` and `dense_rank` never need a tie-break column?
+@@@FILE fullReading.md
+# Reading - sql/v3a02_ranking_top_n
+
+The top-N-per-group problem is old enough to have a folklore. Before window
+functions reached PostgreSQL in 8.4, the standard answers were a correlated
+subquery counting how many rows in the group beat this one, or a self-join
+with an inequality and a `GROUP BY ... HAVING count(*) < 3`. Both work. Both
+are quadratic in the size of a group. Both are still in production somewhere
+near you, and reading one is a good way to appreciate what `row_number`
+replaced.
+
+```sql
+-- the pre-8.4 top-3-per-category, still correct, still quadratic
+SELECT p.category, p.id, p.name, p.price
+FROM products p
+WHERE (SELECT count(*)
+       FROM products q
+       WHERE q.category = p.category
+         AND (q.price, q.id) > (p.price, p.id)) < 3;
+```
+
+That subquery runs once per row and scans the category each time. With ten
+thousand products in six categories, it is roughly ten thousand scans of
+seventeen hundred rows: seventeen million comparisons to produce eighteen
+rows. The window version sorts ten thousand rows once. The asymptotic
+difference is the entire reason window functions exist.
+
+## What the plan looks like
+
+```
+ Subquery Scan on ranked  (rows=15)
+   Filter: (ranked.dept_rank <= 3)
+   ->  WindowAgg  (rows=500)
+         ->  Sort  (rows=500)
+               Sort Key: department, salary DESC, id
+               ->  Seq Scan on staff  (rows=500)
+```
+
+Three things are worth reading off it.
+
+First, the filter is above the `WindowAgg`, not below. The planner cannot
+push `dept_rank <= 3` down, because the rank does not exist until the window
+node has produced it, and even if it could evaluate it early it would change
+the input to the window and therefore the ranks themselves. This is a hard
+barrier: predicates on window outputs never move down. Predicates on
+*partitioning columns* are different — `WHERE department = 'ops'` outside the
+CTE can, in principle, be pushed into it, because removing whole partitions
+cannot change the ranks inside the surviving one. PostgreSQL does implement
+that particular pushdown, and it is the one qual you can rely on moving.
+
+Second, the `Sort Key` is `PARTITION BY` columns followed by `ORDER BY`
+columns. `WindowAgg` needs its input clustered by partition and ordered
+within it; the sort is how that happens. An index on `(department, salary
+DESC, id)` would let an index scan supply the same ordering and the sort
+would disappear. In this course's dataset no such index exists, so every
+ranking query you write here pays for a sort — which for 500 rows is
+nothing, for 10,000 rows is milliseconds, and for a hundred million rows is
+the query.
+
+Third, the estimated row count above the filter — 15 here — is a guess.
+PostgreSQL has no statistics on window outputs and applies a default
+selectivity to `dept_rank <= 3`. If that estimate feeds a join, the join
+method can be chosen on a fiction. This is a real reason to materialise a
+top-N into a temporary table when it feeds a much larger pipeline, and it is
+the kind of thing you only learn by reading `EXPLAIN (ANALYZE)` and noticing
+`rows=200 actual rows=15`.
+
+## Where the ranking functions come from
+
+`ROW_NUMBER`, `RANK` and `DENSE_RANK` all arrived in SQL:2003 as part of the
+window-function feature, along with `PERCENT_RANK`, `CUME_DIST` and `NTILE`.
+The three in this sector are the "ranking functions"; the standard's
+`ORDER BY` requirement is worth noting — `ROW_NUMBER` is allowed without an
+`ORDER BY` in PostgreSQL, and returns an arbitrary numbering, which is
+occasionally useful (numbering rows for a `DELETE` of exact duplicates) and
+usually a mistake.
+
+The `WITH TIES` option on `FETCH FIRST` is older in the standard than in
+PostgreSQL: SQL:2008 defined it, PostgreSQL implemented it in version 13
+(2020). Before that the idiom was exactly what you write for a per-group
+top-N — rank in a subquery, filter outside — applied to the whole result. It
+is worth knowing that `WITH TIES` is implemented as a `Limit` node with a
+tie-check against the sort key rather than as a window, which is why it can
+stop early: on a `LIMIT 10` over a million sorted rows, the executor never
+materialises the other 999,990. A window function cannot do that. It must
+number every row before it knows which ones to keep, which is the deep
+reason `LIMIT`-shaped questions and `rank`-shaped questions have different
+performance characteristics no matter how you write them.
+
+## Choosing between the window and LATERAL
+
+The decision is about how many groups there are and whether an index can
+serve each group's top rows directly.
+
+The window plan is: sort everything once, walk it once. Cost is roughly
+`n log n` in the number of rows, independent of the number of groups.
+
+The `LATERAL` plan is: for each group, run a small query. With a btree index
+on `(category, price DESC, id)`, each of those queries is an index descent
+plus two rows — effectively free. Six categories means six descents. Cost is
+proportional to the number of *groups*, not rows.
+
+So: six categories and an index, `LATERAL` wins by orders of magnitude.
+Fifty thousand customers and no index, the window wins, because fifty
+thousand index-less scans is a catastrophe. In between, measure. The
+crossover moves with `work_mem` too — if the sort spills to disk, the window
+plan's advantage evaporates.
+
+There is a third shape worth knowing: when N is exactly 1, PostgreSQL's
+`DISTINCT ON` is both shorter and usually faster than either, because it can
+be answered by a single sort with a unique-ification pass. Sector
+v3a06_dedup_latest_row is entirely about that case.
+
+## The determinism argument, in full
+
+It is worth being precise about why an unstable `row_number` is a bug rather
+than an inconvenience, because the argument generalises well beyond this
+sector.
+
+A SQL query is supposed to be a function of its input. Given the same table
+contents, it should produce the same answer — not the same *ordering* of the
+answer, which only `ORDER BY` guarantees, but the same set of rows and the
+same values in them. `row_number() OVER (ORDER BY total DESC)` breaks that
+property: the value of the column depends on the order the sort node emitted
+tied rows, and that order is an implementation detail. It can change when
+the planner switches from a quicksort to an external merge sort because
+`work_mem` changed. It can change when a parallel sequential scan hands
+tuples to the sort in a different interleaving. It can change when a row is
+updated and moves to the end of the heap.
+
+Now put a `WHERE rn <= 10` on top and the *row set* becomes unstable too.
+That is a query whose answer is not determined by the data, shipped to a
+dashboard that people make decisions with. Nothing errors, nothing logs, and
+the only symptom is that two people looking at the same report disagree
+about who is tenth.
+
+The cost of prevention is one column in one `ORDER BY`. The habit worth
+building is to read every `ORDER BY` that feeds a `LIMIT`, a `row_number`,
+a `DISTINCT ON` or a `FETCH FIRST` and ask: could two rows tie here? If the
+answer is yes or "probably not", add the primary key. `rank` and
+`dense_rank` are exempt, because they are defined to give peers the same
+answer — which is a good reason to prefer them whenever the tie-break is
+genuinely arbitrary rather than merely unspecified.
+
+## When not to rank
+
+**When you wanted an aggregate.** "The highest salary per department" is
+`max(salary) GROUP BY department`, one row per department, no window
+required. Rank when you need the *row* — the person's name — not the value.
+
+**When N is 1.** Use `DISTINCT ON`, or `LATERAL ... LIMIT 1`. `row_number()
+= 1` works and is more portable; inside PostgreSQL the other two read
+better.
+
+**When the requirement is "everything above a threshold".** `WHERE salary >
+150000` is not a top-N; it is a filter. Ranking it and then filtering the
+rank is a way to make a cheap query expensive and a clear query obscure.
+
+**When the ranking is a proxy for a percentile.** "The top 10%" is
+`percent_rank` or `ntile`, not `row_number() <= count(*) / 10` computed in
+your head. That is sector v3a07_percentiles_ntile.
+
+The judgement worth carrying: ranking answers "which rows", aggregation
+answers "what value", and the moment a requirement contains the word "each"
+alongside a number greater than one, you are in this sector's territory and
+the two-level shape is the answer.

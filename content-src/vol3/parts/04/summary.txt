@@ -1,0 +1,1 @@
+Past try/catch and into design: exception types worth catching, throw helpers and CallerArgumentExpression, filters that decide without unwinding, Try-versus-Parse as one core with two faces, async failure shapes, cancellation that is not failure, result types at the edge, and what a throw actually costs.

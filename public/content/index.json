@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "tracks": [
+    {
+      "id": "sql",
+      "name": "SQL Frontier",
+      "description": "PostgreSQL, data, and query craft",
+      "lessonCount": 115,
+      "exerciseCount": 779,
+      "coreCount": 729,
+      "pack": "/content/sql.json"
+    },
+    {
+      "id": "typescript",
+      "name": "TypeScript Citadel",
+      "description": "Types that make impossible states impossible",
+      "lessonCount": 39,
+      "exerciseCount": 275,
+      "coreCount": 252,
+      "pack": "/content/typescript.json"
+    },
+    {
+      "id": "node",
+      "name": "Node Reactor",
+      "description": "The runtime, event loop, streams, and servers",
+      "lessonCount": 39,
+      "exerciseCount": 274,
+      "coreCount": 253,
+      "pack": "/content/node.json"
+    },
+    {
+      "id": "react",
+      "name": "React Wilds",
+      "description": "Components, state, effects, and resilient UI",
+      "lessonCount": 39,
+      "exerciseCount": 275,
+      "coreCount": 252,
+      "pack": "/content/react.json"
+    },
+    {
+      "id": "csharp",
+      "name": "C# Forge",
+      "description": "Language fundamentals through production async",
+      "lessonCount": 41,
+      "exerciseCount": 289,
+      "coreCount": 261,
+      "pack": "/content/csharp.json"
+    },
+    {
+      "id": "dotnet",
+      "name": ".NET Nexus",
+      "description": "APIs, dependency injection, data, and auth",
+      "lessonCount": 37,
+      "exerciseCount": 263,
+      "coreCount": 244,
+      "pack": "/content/dotnet.json"
+    }
+  ],
+  "lessonCount": 310,
+  "exerciseCount": 2155
+}

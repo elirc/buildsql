@@ -1,1 +1,0 @@
--- 47_capstone/ex3: fix the plan from the README

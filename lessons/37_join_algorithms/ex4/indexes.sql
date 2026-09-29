@@ -1,1 +1,0 @@
--- 37_join_algorithms/ex4: your CREATE INDEX here (see README.md)

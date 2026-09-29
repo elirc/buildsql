@@ -1,0 +1,693 @@
+@@@META
+{
+  "slug": "v3a01_window_frames",
+  "title": "V3·A1 — Window frames: ROWS, RANGE, and GROUPS",
+  "summary": "Lesson 16 gave you OVER (ORDER BY ...) and let the default frame do the work. This sector opens that box: what a frame is, why ORDER BY silently installs one, how ROWS and RANGE disagree the moment your sort key has ties, and the frame that makes last_value stop lying to you."
+}
+@@@FILE briefing.md
+# V3·A1 — Window frames: ROWS, RANGE, and GROUPS
+
+Lesson 16 taught you that `sum(x) OVER (ORDER BY day)` is a running total,
+and left it there. That sentence is true and it is also a shortcut. The
+running total is not something `sum` does; it is something the *frame* does,
+and the frame was chosen for you the moment you typed `ORDER BY` inside the
+`OVER`. Every surprising window-function result you will ever debug comes
+from that invisible default.
+
+This sector makes the frame visible. By the end you will be able to read an
+`OVER` clause the way the executor reads it: partition the rows, sort each
+partition, and then, *for every row independently*, decide which slice of
+that sorted partition the aggregate is allowed to see. Three separate
+decisions, three separate places to get it wrong.
+
+## Concept
+
+A window specification has three parts, and all three are optional:
+
+```sql
+OVER (
+  PARTITION BY department      -- 1. cut the rows into independent groups
+  ORDER BY hired_on, id        -- 2. sort within each group
+  ROWS BETWEEN 2 PRECEDING     -- 3. per row, which slice can the
+       AND CURRENT ROW         --    aggregate see?
+)
+```
+
+Leave out all three — `OVER ()` — and every row sees every row. That is why
+`sum(total) OVER ()` next to a detail row is the grand total, and why
+`total / sum(total) OVER ()` is share-of-total in one pass with no join.
+
+Leave out only the frame and the rule is not "no frame". It is:
+
+- **No `ORDER BY`** → the frame is the whole partition. `avg(salary) OVER
+  (PARTITION BY department)` is the department average on every row.
+- **With `ORDER BY`** → the frame defaults to `RANGE BETWEEN UNBOUNDED
+  PRECEDING AND CURRENT ROW`. That is the running total. Note the word
+  `RANGE`.
+
+`RANGE` and `ROWS` are not synonyms, and the difference is entirely about
+**peers** — rows that tie on the `ORDER BY` key:
+
+- `ROWS` counts physical rows. `CURRENT ROW` means *this* row.
+- `RANGE` works in value space. `CURRENT ROW` means "the last row that ties
+  with me", so every peer gets the *same* frame and therefore the same
+  answer.
+- `GROUPS` (PostgreSQL 11 and later) counts *peer groups*. `GROUPS BETWEEN 1
+  PRECEDING AND 1 FOLLOWING` means "my tie-group, plus the one before it and
+  the one after it, however many rows those contain".
+
+Consider five salaries ordered by a banded value, with a tie in the middle:
+
+```
+salary  band     sum ... RANGE (default)   sum ... ROWS UNBOUNDED PRECEDING
+ 50000  50000            50000                      50000
+ 60000  60000           170000                     110000   <- peer
+ 60000  60000           170000                     170000   <- peer
+ 70000  70000           240000                     240000
+```
+
+The two peers get identical `RANGE` totals because `RANGE` cannot see a
+difference between them — and it is right not to: with only `band` in the
+`ORDER BY`, there is no defined order between those two rows, so any
+per-peer answer would be arbitrary. `ROWS` will happily give you that
+arbitrary answer. This is the single most important trade in the sector:
+**`ROWS` over a non-unique `ORDER BY` is non-deterministic.** Add a unique
+tie-break column and `ROWS` becomes both deterministic and, usually, what
+you meant.
+
+Frame bounds you can write, in either mode:
+
+```sql
+UNBOUNDED PRECEDING     -- start of the partition
+n PRECEDING             -- n rows back (ROWS) / value - n (RANGE) / n peer groups (GROUPS)
+CURRENT ROW
+n FOLLOWING
+UNBOUNDED FOLLOWING     -- end of the partition
+```
+
+`RANGE`'s offsets live in value space, so `RANGE BETWEEN INTERVAL '60 days'
+PRECEDING AND CURRENT ROW` over a date column means "the last sixty days",
+not "the last sixty rows" — a distinction that matters enormously when your
+series has holes in it. `RANGE` with an offset requires exactly one
+`ORDER BY` column, of a type PostgreSQL knows how to add an offset to
+(numeric, date, timestamp, interval).
+
+PostgreSQL 11 also added frame **exclusion**, which subtracts from whatever
+the bounds selected:
+
+```sql
+GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE GROUP
+```
+
+`EXCLUDE CURRENT ROW` drops just this row; `EXCLUDE GROUP` drops this row
+and all its peers; `EXCLUDE TIES` drops the peers but keeps this row;
+`EXCLUDE NO OTHERS` is the default and does nothing. "The average of my
+neighbours, not counting me" is a one-clause query rather than a
+self-join with an inequality.
+
+Finally, when three output columns share one window, name it:
+
+```sql
+SELECT day, revenue,
+       first_value(revenue) OVER w AS first_day,
+       last_value(revenue)  OVER w AS last_day,
+       sum(revenue)         OVER w AS month_total
+FROM daily
+WINDOW w AS (ORDER BY day ROWS BETWEEN UNBOUNDED PRECEDING
+                              AND UNBOUNDED FOLLOWING)
+ORDER BY day;
+```
+
+The `WINDOW` clause sits between `HAVING` and `ORDER BY`. It is worth using
+for more than brevity: it makes it structurally impossible for two columns
+that are supposed to share a window to drift apart.
+
+That example also contains the classic bug. Written with the *default*
+frame, `last_value(revenue) OVER (ORDER BY day)` returns the current row's
+own revenue on every row, because the default frame ends at the current
+row — the "last value" of a frame that stops here is here. `first_value` is
+fine by luck, since the default frame starts at the beginning. `last_value`
+and `nth_value` need `UNBOUNDED FOLLOWING` spelled out, always.
+
+Everything in this sector runs against `staff` (500 rows) and October 2023
+`orders` — small enough to read the whole result and check the arithmetic
+by hand, which is the only way frames ever become intuitive.
+
+## Exercise 1 — the empty window
+
+Every staff member beside the company-wide average salary and their distance
+from it, computed without a join, a subquery, or a second scan.
+
+## Exercise 2 — partitioning without ordering
+
+The same idea per department: department average, department headcount, and
+each person's distance from their own department's mean.
+
+## Exercise 3 — ORDER BY installs a frame
+
+A cumulative payroll figure over the finance department in hire order, with
+a unique tie-break so the answer is defined.
+
+## Exercise 4 — ROWS and RANGE disagree
+
+The same running total computed both ways over a sort key with enormous tie
+groups. The two columns sit side by side so the difference is impossible to
+miss.
+
+## Exercise 5 — frames that look forward
+
+Daily October revenue with a forward-looking frame and a centred frame,
+including what happens to both at the edges of the month.
+
+## Exercise 6 — RANGE with an interval
+
+Hiring density: for every member of the finance team, how many colleagues
+were hired in the trailing sixty days, compared against a fixed row count.
+The series is sparse, which is exactly when the two answers diverge.
+
+## Exercise 7 — GROUPS and EXCLUDE
+
+Salary bands, the band's neighbours, and the same figure with the band
+itself removed.
+
+## Exercise 8 — a named window and the last_value trap
+
+October's daily revenue with the month's first day, last day and total
+alongside every row, all from one named window with an explicit frame.
+
+## Challenge — two named windows
+
+Daily revenue per status, each row carrying its status's monthly total, its
+share of that total, and a three-day trailing sum that resets at every
+status boundary.
+
+## Spaced review
+
+`review1/`: the ops department's payroll, richest first, with a cumulative
+percentage-of-payroll column — a default frame and an empty window in the
+same expression.
+@@@FILE explanation.md
+# Reading - sql/v3a01_window_frames
+
+A window function is three decisions wearing one clause. Partition, order,
+frame. Learn to say which of the three you are changing and window functions
+stop being folklore.
+
+## Notes
+
+**The frame is per row, not per query.** The executor sorts the partition
+once, then walks it; at each row it recomputes (incrementally, where it can)
+the aggregate over that row's frame. This is why `sum(x) OVER (ORDER BY d)`
+returns a different value on every row while `sum(x) OVER ()` returns the
+same one: the frames differ, the function does not. Nothing about `sum`
+changed.
+
+**`ORDER BY` inside `OVER` is not just a sort.** It installs `RANGE BETWEEN
+UNBOUNDED PRECEDING AND CURRENT ROW`. Two consequences people trip over:
+adding an `ORDER BY` to an existing `avg(x) OVER (PARTITION BY g)` silently
+converts a group average into a running average, and removing it converts
+a running total into a grand total. The clause that looks cosmetic is the
+one that changes the arithmetic.
+
+**`RANGE` is about values, `ROWS` is about positions.** With `ORDER BY
+department`, `RANGE`'s `CURRENT ROW` bound means "through the last row whose
+department equals mine", so all 138 people in sales share one running total.
+`ROWS UNBOUNDED PRECEDING` means "through me", so each of the 138 gets a
+different one — but *which* different one depends on the order the executor
+happened to produce among equal keys. That ordering is not guaranteed and
+can change with a plan change. If you want per-row accumulation, make the
+`ORDER BY` unique; the cost is one extra sort column and the benefit is a
+result that survives an upgrade.
+
+**`GROUPS` counts tie-groups.** It is the mode nobody teaches and the one
+that expresses "this band and the bands on either side" without knowing how
+many rows a band contains. `ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING` over
+banded data gives you three arbitrary rows; `GROUPS BETWEEN 1 PRECEDING AND
+1 FOLLOWING` gives you three bands.
+
+**Exclusion subtracts after the bounds select.** `EXCLUDE CURRENT ROW`
+removes one row, `EXCLUDE GROUP` removes the row and its peers, `EXCLUDE
+TIES` removes the peers but keeps the row. Note the asymmetry between the
+last two — it is the difference between "the other bands" and "everyone in
+my band except me". An empty frame is legal: `count(*)` over it is `0`,
+every other aggregate is NULL.
+
+**A frame can be entirely in the future.** `ROWS BETWEEN 1 FOLLOWING AND 3
+FOLLOWING` is a perfectly ordinary frame, and near the end of a partition it
+simply contains fewer rows, or none. That is why forward-looking columns go
+NULL at the tail rather than erroring, and why `count(*)` in the same frame
+tells you how many rows the average was actually taken over — the standard
+way to blank out a partial window instead of publishing an average of two
+days as if it were an average of seven.
+
+**`last_value` obeys the frame, and the default frame ends here.** The fix
+is `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`. `nth_value`
+has the same problem. `first_value` does not, which is what makes the bug so
+convincing: half the report is right.
+
+**The `WINDOW` clause is not sugar.** `WINDOW w AS (...)` names a window and
+`OVER w` uses it; `OVER (w ORDER BY x)` even extends it. When four columns
+must share a frame, naming it converts a review question ("are these frames
+identical?") into a syntactic fact.
+
+## ex1 — the empty window
+
+`OVER ()` is the frame "everything". The classic mistake is reaching for a
+subquery or a `CROSS JOIN` out of habit; the window version reads better and
+the planner computes the aggregate once for the whole scan.
+
+## ex2 — partitioning without ordering
+
+`PARTITION BY` with no `ORDER BY` gives every row its whole partition. If
+your department averages come out looking cumulative, you left an `ORDER BY`
+in the `OVER` clause.
+
+## ex3 — ORDER BY installs a frame
+
+Cumulative payroll in hire order. The tie-break in the window's `ORDER BY`
+is the whole point: `hired_on` alone would leave two people hired on the
+same day with an undefined relative position.
+
+## ex4 — ROWS and RANGE disagree
+
+`ORDER BY department` produces five peer groups of 61 to 138 rows. The
+`RANGE` column is flat within a department and jumps at the boundary; the
+`ROWS` column climbs on every row. Neither is wrong; they answer different
+questions, and only one of them is defined without a unique sort key.
+
+## ex5 — frames that look forward
+
+The interesting rows are the last three days of the month, where the
+forward frame runs out of rows. A sum over an empty frame is NULL, not zero,
+and `coalesce` here would be a lie about the future.
+
+## ex6 — RANGE with an interval
+
+The finance team's hire dates are sparse — most days have no hire at all.
+`ROWS BETWEEN 3 PRECEDING` counts three colleagues no matter how many years
+separate them; `RANGE BETWEEN INTERVAL '60 days' PRECEDING` counts calendar
+time and returns 1 for anybody hired in a quiet stretch. Rows are not time.
+
+## ex7 — GROUPS and EXCLUDE
+
+Banding the salary manufactures peer groups. `GROUPS` then works in bands,
+and `EXCLUDE GROUP` turns "me and my neighbours" into "my neighbours". The
+mistake to avoid is `EXCLUDE TIES`, which keeps you and drops your
+colleagues — occasionally what you want, never what you meant here.
+
+## ex8 — a named window and the last_value trap
+
+Three columns, one window, one explicit frame. Write it once with the
+default frame first and watch `last_value` return each row's own revenue;
+that failure is worth more than the pass.
+
+## challenge — two named windows
+
+Two windows over the same partition with different frames. Naming them makes
+the query readable and makes it obvious that only the frame differs.
+
+## review1 — cumulative share
+
+`sum(salary) OVER (ORDER BY salary DESC, id)` over `sum(salary) OVER ()`, in
+one expression. Both are windows; only the frames differ.
+
+## Further reading
+
+- [Window Function Calls](https://www.postgresql.org/docs/16/sql-expressions.html#SYNTAX-WINDOW-FUNCTIONS) — the authoritative grammar for `OVER`, every frame bound, and the exclusion clauses. Short, dense, worth reading twice.
+- [Window Function Processing](https://www.postgresql.org/docs/16/queries-table-expressions.html#QUERIES-WINDOW) — where the default frame is stated in one sentence, and where peers are defined.
+- [SELECT — the WINDOW clause](https://www.postgresql.org/docs/16/sql-select.html#SQL-WINDOW) — naming and extending windows, including `OVER (w ORDER BY ...)`.
+- [Window Functions (tutorial)](https://www.postgresql.org/docs/16/tutorial-window.html) — the gentler introduction, useful for the diagram of partitions and frames.
+- [Built-in Window Functions](https://www.postgresql.org/docs/16/functions-window.html) — the table that tells you which functions respect the frame (`first_value`, `last_value`, `nth_value`) and which ignore it (`row_number`, `rank`, `lag`, `lead`).
+@@@FILE fullReadme.md
+# V3·A1 — Window frames: ROWS, RANGE, and GROUPS
+
+Lesson 16 handed you `sum(x) OVER (ORDER BY day)` and told you it was a
+running total. This sector explains why, and everything that follows from
+the explanation.
+
+## Concept
+
+Read an `OVER` clause as three independent decisions.
+
+```sql
+OVER (
+  PARTITION BY status     -- 1. independent groups
+  ORDER BY day            -- 2. an order within each group
+  ROWS BETWEEN 2 PRECEDING AND CURRENT ROW   -- 3. per-row visibility
+)
+```
+
+Only the third one is normally invisible, and it is the one that decides the
+arithmetic.
+
+**The default frame.** With no `ORDER BY`, the frame is the entire
+partition. With an `ORDER BY`, the frame becomes `RANGE BETWEEN UNBOUNDED
+PRECEDING AND CURRENT ROW`. So:
+
+```sql
+avg(salary) OVER (PARTITION BY department)                -- department average
+avg(salary) OVER (PARTITION BY department ORDER BY id)    -- running average
+```
+
+Those two lines differ by five characters and answer different questions.
+Whenever a window result looks like it is "growing", check whether an
+`ORDER BY` snuck in.
+
+**Peers.** Two rows are peers when they tie on every `ORDER BY` expression
+in the window. Peers are the entire reason there are three frame modes.
+
+```sql
+-- 500 staff rows, ordered only by department: five peer groups
+sum(salary) OVER (ORDER BY department)                       -- RANGE: flat per department
+sum(salary) OVER (ORDER BY department, id ROWS UNBOUNDED PRECEDING)  -- ROWS: climbs
+```
+
+The first is deterministic. The second is deterministic *because* `id` was
+added; without it, `ROWS` would accumulate peers in whatever order the sort
+produced, which is not a guarantee you can build a report on.
+
+**Frame bounds.**
+
+```sql
+ROWS   BETWEEN 6 PRECEDING AND CURRENT ROW         -- 7 physical rows
+RANGE  BETWEEN INTERVAL '6 days' PRECEDING
+             AND CURRENT ROW                       -- a 7-day calendar window
+GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING         -- three peer groups
+ROWS   BETWEEN 1 FOLLOWING AND 3 FOLLOWING         -- entirely in the future
+ROWS   BETWEEN UNBOUNDED PRECEDING
+             AND UNBOUNDED FOLLOWING               -- the whole partition
+```
+
+`RANGE` with an offset needs exactly one `ORDER BY` column of a type that
+supports the offset: numeric offsets for numeric columns, `interval` offsets
+for date and timestamp columns. `RANGE BETWEEN 1000 PRECEDING AND CURRENT
+ROW` over `ORDER BY salary` means "everyone earning within 1000 below me",
+which is a genuinely different query from "the previous row".
+
+**Exclusion.**
+
+```sql
+GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING EXCLUDE GROUP   -- neighbours only
+ROWS   BETWEEN 3 PRECEDING AND 3 FOLLOWING EXCLUDE CURRENT ROW
+```
+
+`EXCLUDE CURRENT ROW` removes the row. `EXCLUDE GROUP` removes the row and
+its peers. `EXCLUDE TIES` removes the peers and keeps the row. `EXCLUDE NO
+OTHERS` is the default.
+
+**Named windows.**
+
+```sql
+SELECT day, revenue,
+       sum(revenue)         OVER month_total AS month_revenue,
+       first_value(revenue) OVER month_total AS first_day,
+       last_value(revenue)  OVER month_total AS last_day
+FROM daily
+WINDOW month_total AS (ORDER BY day
+                       ROWS BETWEEN UNBOUNDED PRECEDING
+                                AND UNBOUNDED FOLLOWING)
+ORDER BY day;
+```
+
+## Worked example — the last_value bug, start to finish
+
+Here is the query almost everybody writes first:
+
+```sql
+SELECT day, revenue,
+       first_value(revenue) OVER (ORDER BY day) AS first_day,
+       last_value(revenue)  OVER (ORDER BY day) AS last_day
+FROM daily ORDER BY day;
+```
+
+and the result it produces:
+
+```
+    day     | revenue | first_day | last_day
+------------+---------+-----------+----------
+ 2023-10-01 |   41500 |     41500 |    41500
+ 2023-10-02 |   38200 |     41500 |    38200
+ 2023-10-03 |   44100 |     41500 |    44100
+```
+
+`last_day` is just `revenue` again. The default frame ends at the current
+row, so the last value *in the frame* is this row. `first_value` looks
+right only because the default frame starts at the beginning of the
+partition. The fix is to say what you meant:
+
+```sql
+last_value(revenue) OVER (ORDER BY day
+                          ROWS BETWEEN UNBOUNDED PRECEDING
+                                   AND UNBOUNDED FOLLOWING) AS last_day
+```
+
+An equivalent trick that avoids the frame entirely is `first_value(revenue)
+OVER (ORDER BY day DESC)` — correct, and harder to read six months later.
+
+## Worked example — a partial window, admitted
+
+A three-day trailing average over a month starts with an average of one day
+and an average of two days, dressed up as a three-day average:
+
+```sql
+SELECT day, revenue,
+       round(avg(revenue) OVER w, 2) AS avg3,
+       count(*) OVER w               AS days_in_window,
+       CASE WHEN count(*) OVER w = 3
+            THEN round(avg(revenue) OVER w, 2) END AS avg3_strict
+FROM daily
+WINDOW w AS (ORDER BY day ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+ORDER BY day;
+```
+
+`count(*)` over the same frame is the honest way to decide whether to
+publish the number. Note that `CASE` can wrap a window function; a window
+function simply cannot appear in `WHERE` or `HAVING`, because those clauses
+run before windowing.
+
+## Common mistakes
+
+- **Assuming `ROWS` and `RANGE` are the same.** They agree only when the
+  `ORDER BY` is unique. Everywhere else they answer different questions.
+- **`ROWS` over a non-unique key.** The result is not wrong so much as
+  undefined. Add a unique tie-break.
+- **`last_value` with the default frame.** Covered above. It survives review
+  because `first_value` in the same query is correct.
+- **Windows in `WHERE`.** `WHERE row_number() OVER (...) = 1` is a syntax
+  error, not a subtlety: windows are computed after `WHERE` and `GROUP BY`.
+  Wrap the window in a subquery or CTE and filter outside.
+- **`coalesce`ing an empty frame to zero.** A forward-looking frame at the
+  end of a partition is genuinely empty. NULL means "there is no next
+  week"; zero means "next week is worthless".
+- **Interval offsets on the wrong order key.** `RANGE BETWEEN INTERVAL '7
+  days' PRECEDING` requires exactly one `ORDER BY` column of a date or
+  timestamp type. Two columns is an error, and an integer column with an
+  interval offset is an error.
+- **Windowing the raw table.** Aggregating 500,000 orders to 31 daily rows
+  and then windowing is not an optimisation trick, it is the normal shape.
+  Windowing half a million rows to produce 31 numbers is a smell.
+
+## The interview answer
+
+> *What does `ORDER BY` inside an `OVER` clause do?*
+
+Two things. It defines the order within the partition, and — because the
+frame clause was omitted — it installs the default frame, `RANGE BETWEEN
+UNBOUNDED PRECEDING AND CURRENT ROW`. That is what makes an ordered window
+aggregate cumulative. If you want a physical row count instead of a value
+range, say `ROWS` explicitly, and make sure the `ORDER BY` is unique, or the
+per-row answer is undefined among tied rows.
+
+Follow it up, unprompted, with the `last_value` example. It is the fastest
+way to show you have actually debugged a window function rather than read
+about one.
+
+## Check yourself
+
+1. What is the frame when the `OVER` clause is completely empty?
+2. What is the frame when the `OVER` clause has a `PARTITION BY` but no
+   `ORDER BY`?
+3. Write the default frame out in full.
+4. Two rows tie on the window's `ORDER BY`. Under `RANGE`, do they get the
+   same running total? Under `ROWS`?
+5. Why is `ROWS UNBOUNDED PRECEDING` over a non-unique `ORDER BY` a bug even
+   when the numbers look plausible?
+6. What does `GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING` select that `ROWS
+   BETWEEN 1 PRECEDING AND 1 FOLLOWING` does not?
+7. Distinguish `EXCLUDE GROUP` from `EXCLUDE TIES`.
+8. What does `count(*)` return over an empty frame? What does `sum(x)`
+   return?
+9. Why does `last_value` need an explicit frame when `first_value` does not?
+10. Which of `rank`, `lag`, `sum`, `nth_value` are affected by the frame
+    clause?
+11. What are the type restrictions on `RANGE BETWEEN INTERVAL '30 days'
+    PRECEDING`?
+12. Rewrite `last_value(x) OVER (ORDER BY d ROWS BETWEEN UNBOUNDED
+    PRECEDING AND UNBOUNDED FOLLOWING)` without a frame clause.
+13. Where in the statement does the `WINDOW` clause go, and what can `OVER
+    (w ORDER BY x)` do that `OVER w` cannot?
+14. Why can a window function not appear in `HAVING`, and what is the
+    standard workaround?
+@@@FILE fullReading.md
+# Reading - sql/v3a01_window_frames
+
+Window functions arrived in the SQL standard in 2003 and in PostgreSQL in
+8.4, released in 2009. Before that, every one of the queries in this sector
+was written as a correlated subquery or a self-join with an inequality in
+the `ON` clause — `sum(t2.total)` over all `t2` rows with a smaller date,
+recomputed for every row of `t1`. Those queries were quadratic and everybody
+knew it. Understanding what the window machinery replaced is most of what
+you need to understand why it is shaped the way it is.
+
+## What the executor actually does
+
+A window function is not a function call in the ordinary sense; it is a
+plan node. Run `EXPLAIN` on any query in this sector and you will find a
+`WindowAgg` node, and almost always a `Sort` immediately beneath it:
+
+```
+ WindowAgg  (cost=... rows=500 width=...)
+   ->  Sort  (cost=... rows=500 width=...)
+         Sort Key: department, id
+         ->  Seq Scan on staff
+```
+
+The order is the point. `WindowAgg` requires its input already sorted by
+`PARTITION BY` columns followed by `ORDER BY` columns, so it can detect
+partition boundaries and peer groups by comparing adjacent rows — it never
+sorts anything itself. If your query has several windows with different
+sort requirements, the planner stacks several `WindowAgg` nodes, each with
+its own `Sort` (or `Incremental Sort`, when one ordering is a prefix of the
+next). Two windows that share a specification, on the other hand, share a
+single node: that is a small, real reason to name a window and reuse it
+rather than retyping a slightly different one.
+
+Inside the node, rows of the current partition are buffered in a
+`tuplestore`. If the partition fits in `work_mem`, that buffer is memory; if
+not, it spills to a temporary file, and your query starts doing disk I/O
+that `EXPLAIN (ANALYZE, BUFFERS)` will report as temp reads and writes. The
+size of the buffer depends on the frame: for a frame that only ever moves
+forward — `UNBOUNDED PRECEDING` to `CURRENT ROW`, or a trailing `n
+PRECEDING` — PostgreSQL can discard rows it has passed. For a frame that
+reaches forward (`UNBOUNDED FOLLOWING`, or `n FOLLOWING`), it cannot: it has
+to hold the whole partition. That is the practical cost of the `last_value`
+fix, and it is the reason a single query over a table partitioned into a few
+huge groups can be much heavier than the same query over many small ones.
+
+There is a second optimisation worth knowing about. For a cumulative frame
+(`UNBOUNDED PRECEDING AND CURRENT ROW`), PostgreSQL computes the aggregate
+*incrementally*: it keeps a running transition state and adds each new row.
+For a sliding frame (`n PRECEDING AND CURRENT ROW`), it would need to remove
+rows from the state as they fall out of the back — and it can, but only for
+aggregates that have an inverse transition function. `sum` and `count` over
+integers and numerics have one; `max` and `min` do not, because you cannot
+"un-max" a value. So a sliding `max` over a wide frame recomputes from
+scratch at every row, and its cost is proportional to frame width times
+partition size, while a sliding `sum` is linear. Nobody notices this until
+the frame is a thousand rows wide, and then it is the whole story.
+
+## Why there are three frame modes
+
+`ROWS` came first in practice because it is obvious: count rows. `RANGE`
+existed in SQL:2003 but only in its bounded-by-`CURRENT ROW` form; the
+offset form — `RANGE BETWEEN 5 PRECEDING` meaning "values within five of
+mine" — arrived in SQL:2011 and in PostgreSQL 11, alongside `GROUPS` and the
+`EXCLUDE` clause. The long gap explains a lot of the folklore you will find
+online: advice written before 2018 often says "`RANGE` only supports
+`UNBOUNDED` and `CURRENT ROW`", which was true of PostgreSQL 10 and is not
+true now.
+
+The three modes exist because "nearby" means three different things.
+Positionally nearby is `ROWS`. Nearby in value is `RANGE` — and this is the
+mode that makes time-series queries honest, because "the last seven days" is
+a statement about the calendar, not about how many rows happen to exist. If
+your daily series has a hole in it because a Sunday had no orders, `ROWS
+BETWEEN 6 PRECEDING` quietly reaches back eight calendar days to find seven
+rows. `RANGE BETWEEN INTERVAL '6 days' PRECEDING` does not. Nearby in
+*groups* is `GROUPS`, which is what you want when your ordering key is a
+band, a rating, a bucket, or anything else with deliberate ties, and you
+want to talk about the bands rather than their populations.
+
+The `EXCLUDE` clause exists because "compare me to my neighbours" is a
+recurring question and the pre-2018 answer was arithmetic:
+`(sum(x) OVER w - x) / (count(*) OVER w - 1)` for "the average of everyone
+else". That works for `sum` and `avg` and falls apart for `max`, `min` and
+anything non-invertible. `EXCLUDE CURRENT ROW` makes it a frame property
+instead of an algebra trick, and works for every aggregate.
+
+## Where the peers rule comes from
+
+The `RANGE` peer behaviour is not a PostgreSQL quirk; it is required by the
+standard, and it is required because of determinism. SQL result ordering
+among tied rows is unspecified. If the default frame counted physical rows,
+then `sum(salary) OVER (ORDER BY department)` would produce different
+numbers depending on which plan the optimiser chose — a report that changes
+after an `ANALYZE`. By defining `CURRENT ROW` in value space, the standard
+guarantees that tied rows get identical answers, so the result is a function
+of the data rather than of the plan. When you write `ROWS` you are opting
+out of that guarantee, and you take on the obligation to make the ordering
+unique yourself.
+
+This is worth internalising because it generalises. Any time a query's
+answer depends on the relative order of rows that your `ORDER BY` does not
+distinguish, you have written a query whose result is not determined by its
+input. `LIMIT` without a unique sort, `DISTINCT ON` without a full ordering,
+`ROWS` frames over ties — same bug, three costumes.
+
+## Performance notes
+
+Three habits cover most of it.
+
+**Aggregate first, window second.** The orders table has 500,000 rows and
+October has 31 days. `WindowAgg` over 31 rows is free; over 500,000 rows it
+is a sort of half a million tuples that you then throw away. Roll up in a
+CTE and window the summary. The exception is when you genuinely need a
+per-row annotation — "this order, next to its customer's average" — and then
+the window is the cheap way to get it, because the alternative is a second
+pass over the same table.
+
+**Push filters inside.** A predicate that can be evaluated before the window
+should be. `WHERE created_at >= '2023-10-01'` inside the CTE reduces what
+gets sorted; the same predicate outside the CTE does not, and PostgreSQL
+will not always push it down for you — it cannot push a qual through a
+`WindowAgg` unless the column is a partitioning column, because doing so
+could change which rows are in each frame. That restriction is easy to
+forget and expensive to discover.
+
+**Share windows.** Four columns over one named window is one `WindowAgg`.
+Four columns over four subtly different windows is four nodes and up to four
+sorts.
+
+There is no such thing as an index on a window function, but there is such
+a thing as an index that removes the sort beneath one. A btree index on
+`(customer_id, created_at)` can feed `PARTITION BY customer_id ORDER BY
+created_at` directly, turning `Sort → WindowAgg` into `Index Scan →
+WindowAgg`. In this course's dataset no such index exists — the template
+ships with primary keys only — so every window query you write here sorts.
+That is deliberate; sector 30 onwards is where you learn to remove it.
+
+## When not to use a frame
+
+Three cases.
+
+**When you wanted `GROUP BY`.** If the report has one row per department,
+write `GROUP BY department`. A window that computes the same number on all
+138 sales rows and a `DISTINCT` to squash them is slower and lies about the
+grain of the answer. Windows annotate; grouping collapses. Sector
+v3a08_window_vs_groupby is entirely about telling those apart.
+
+**When the frame is doing arithmetic you could do directly.** "Compare each
+row to the previous one" is `lag`, not a two-row frame with a `min`.
+"The first order per customer" is `first_value` or `DISTINCT ON`, not a
+frame gymnastics exercise. A frame that needs a paragraph of explanation is
+usually the second-best spelling of something with a name.
+
+**When the window is a filter in disguise.** `row_number() OVER (...) = 1`
+in a subquery is idiomatic; a frame designed so that some aggregate happens
+to be NULL exactly on the rows you want to keep is a puzzle, not a query.
+Filter with `WHERE` on a windowed subquery and let the frame do arithmetic.
+
+The judgement to carry forward: a frame is a claim about what a row is
+allowed to see. Write the claim down, in `ROWS`, `RANGE` or `GROUPS`, and
+the next person to read the query — including you — gets to check it
+instead of guessing it.

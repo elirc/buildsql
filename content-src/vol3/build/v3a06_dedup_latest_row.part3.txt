@@ -1,0 +1,801 @@
+@@@FILE ex5/prompt.md
+## Exercise 5 — finding duplicates
+
+Edit `ex5/solution.sql`.
+
+Works against `customers(id int, name text, email text, country text,
+created_at timestamptz)` — 50,000 rows whose names come from a generator, so
+names repeat. Restrict to `id <= 2000`.
+
+Data quality wants the duplicated **rows**, not the duplicated names: every
+customer whose name is shared with at least one other customer in that
+range, each row carrying how many customers share it.
+
+The distinction matters. `GROUP BY name HAVING count(*) > 1` tells you which
+names are duplicated — useful, and you cannot do anything with a group. To
+act on duplicates (inspect them, flag them, delete some of them) you need
+the individual rows, which means an aggregate that annotates rather than
+collapses.
+
+Illustration:
+
+```
+ id   | name          | name_count
+------+---------------+-----------
+  118 | Ana Duarte    |          2
+ 1902 | Ana Duarte    |          2
+  447 | Mia Okafor    |          3
+  801 | Mia Okafor    |          3
+ 1330 | Mia Okafor    |          3
+```
+
+Every member of a duplicate group appears, and `name_count` is the same on
+all of them. Customers with a unique name do not appear at all.
+
+Remember that `count(*) OVER (PARTITION BY name) > 1` cannot go in `WHERE` —
+the window is computed after `WHERE` runs.
+
+Columns, in this order: `id`, `name`, `name_count`.
+
+**Ordered by `name` ascending, then `id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex5
+```
+@@@FILE ex5/hints.md
+## Hint 1
+
+You want a per-group number placed on every row of the group, without
+collapsing the group. That is what distinguishes a window aggregate from a
+`GROUP BY`.
+
+## Hint 2
+
+```sql
+count(*) OVER (PARTITION BY name) AS name_count
+```
+
+No `ORDER BY` inside the `OVER` — adding one would make it a running count,
+which is a different and wrong number here.
+
+## Hint 3
+
+Compute it in a subquery or CTE, then filter `WHERE name_count > 1` outside.
+The decision left to you is where the `id <= 2000` restriction goes: inside
+the windowed query, so that the counts describe only that range, or outside,
+so that the counts describe all 50,000 customers and you then show a subset.
+The prompt asks for the first; make sure your query says so.
+@@@FILE ex5/importantHints.md
+## Hint 1
+
+Be precise about what is being counted before you write anything.
+`name_count` is "how many customers in the range share this name" — a
+property of the *name*, printed on every row that has it. It is not the
+customer's row number within the group, and it is not a running count. If
+your column shows 1, 2, 3 down a group, you added an `ORDER BY` inside the
+`OVER`.
+
+## Hint 2
+
+Compare the two spellings deliberately:
+
+```sql
+SELECT name, count(*) FROM customers WHERE id <= 2000
+GROUP BY name HAVING count(*) > 1;
+```
+
+versus the windowed version. The first tells you *which names*; the second
+tells you *which rows*. Ask which one you could hand to someone who has to
+merge two records, and the difference stops being academic.
+
+## Hint 3
+
+The scope question in hint 3 of the other set is a real trap in production.
+"Duplicate names among our first 2000 customers" and "our first 2000
+customers whose name is duplicated anywhere in the table" are different
+questions with different answers, and the SQL for them differs only in where
+one `WHERE` clause sits. Read the requirement twice.
+@@@FILE ex5/solution.sql
+-- v3a06_dedup_latest_row / ex5 — duplicate customer names, as rows.
+WITH flagged AS (
+    SELECT id,
+           name,
+           count(*) OVER (PARTITION BY name) AS name_count
+    FROM customers
+    WHERE id <= 2000
+)
+SELECT id,
+       name,
+       name_count
+FROM flagged
+WHERE name_count > 1
+ORDER BY name, id;
+@@@FILE ex5/expected.sql
+WITH dup_names AS (
+    SELECT name, count(*) AS name_count
+    FROM customers
+    WHERE id <= 2000
+    GROUP BY name
+    HAVING count(*) > 1
+)
+SELECT c.id,
+       c.name,
+       d.name_count
+FROM customers c
+JOIN dup_names d ON d.name = c.name
+WHERE c.id <= 2000
+ORDER BY c.name, c.id;
+@@@FILE ex6/prompt.md
+## Exercise 6 — first and last in one pass
+
+Edit `ex6/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `customer_id BETWEEN
+1 AND 5` — five customers, roughly fifty rows in total.
+
+Retention wants every order annotated with the *bookends* of its customer's
+history: the id of their first order and the id of their last. Both come
+from the same window, and both are constant within a customer.
+
+`first_value` and `last_value` read a row out of the **frame**, unlike `lag`
+and `lead` which ignore it. With an `ORDER BY` and no frame clause the frame
+is "start of partition through current row", so `first_value` is
+accidentally correct and `last_value` returns the current row's own id on
+every row. Both need `ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED
+FOLLOWING`.
+
+Illustration for one customer:
+
+```
+ customer_id | id     | created_at             | first_order_id | last_order_id
+-------------+--------+------------------------+----------------+--------------
+           1 |  10432 | 2022-11-20 08:14:00+00 |          10432 |        411902
+           1 |  88120 | 2022-12-04 19:02:00+00 |          10432 |        411902
+           1 | 411902 | 2023-09-14 11:02:00+00 |          10432 |        411902
+```
+
+Both new columns are identical down the whole customer. If `last_order_id`
+tracks `id`, you have met the default frame.
+
+Order the window by `created_at, id` — two orders can share a timestamp, and
+"first" must be defined.
+
+Columns, in this order: `customer_id`, `id`, `created_at`,
+`first_order_id`, `last_order_id`.
+
+**Ordered by `customer_id` ascending, then `created_at` ascending, then `id`
+ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex6
+```
+@@@FILE ex6/hints.md
+## Hint 1
+
+Two columns, one window, and the window has to be able to see rows that come
+after the current one. That is a statement about the frame, not about the
+functions.
+
+## Hint 2
+
+```sql
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at, id
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+```
+
+Naming it makes both columns provably share it.
+
+## Hint 3
+
+No filtering and no second query level here — the report is one row per
+order, annotated. The decision left to you is whether to write
+`last_value(id) OVER w` with the unbounded frame, or `first_value(id) OVER
+(PARTITION BY customer_id ORDER BY created_at DESC, id DESC)`. Both are
+correct; one of them requires the reader to mentally reverse a sort.
+@@@FILE ex6/importantHints.md
+## Hint 1
+
+Write it wrong first and look at the output:
+
+```sql
+first_value(id) OVER (PARTITION BY customer_id ORDER BY created_at, id) AS first_order_id,
+last_value(id)  OVER (PARTITION BY customer_id ORDER BY created_at, id) AS last_order_id
+```
+
+`last_order_id` will equal `id` on every row. The default frame ends at the
+current row, so "the last value in the frame" is this row. `first_value` is
+fine because the frame starts at the beginning of the partition — which is
+exactly why this bug gets through review: half the query is visibly correct.
+
+## Hint 2
+
+Notice what else the fixed window gives you for free. Once the frame spans
+the whole partition, `min(created_at) OVER w`, `sum(total) OVER w` and
+`count(*) OVER w` all become per-customer facts on every row, from the same
+sort. That composability is the argument for fixing the frame rather than
+joining to a separate aggregate query.
+
+## Hint 3
+
+There is a real cost to `UNBOUNDED FOLLOWING` worth knowing: the executor
+cannot release rows as it passes them, because the frame reaches forward, so
+it buffers the whole partition. On five customers that is nothing. On a
+partition of ten million rows it is the difference between a window that
+fits in `work_mem` and one that spills to a temporary file — and in that
+situation the join-to-an-aggregate shape may genuinely win.
+@@@FILE ex6/solution.sql
+-- v3a06_dedup_latest_row / ex6 — each order beside its customer's first and last.
+SELECT customer_id,
+       id,
+       created_at,
+       first_value(id) OVER w AS first_order_id,
+       last_value(id)  OVER w AS last_order_id
+FROM orders
+WHERE customer_id BETWEEN 1 AND 5
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at, id
+             ROWS BETWEEN UNBOUNDED PRECEDING
+                      AND UNBOUNDED FOLLOWING)
+ORDER BY customer_id, created_at, id;
+@@@FILE ex6/expected.sql
+WITH mine AS (
+    SELECT customer_id, id, created_at
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 5
+),
+firsts AS (
+    SELECT DISTINCT ON (customer_id) customer_id, id AS first_order_id
+    FROM mine
+    ORDER BY customer_id, created_at, id
+),
+lasts AS (
+    SELECT DISTINCT ON (customer_id) customer_id, id AS last_order_id
+    FROM mine
+    ORDER BY customer_id, created_at DESC, id DESC
+)
+SELECT m.customer_id,
+       m.id,
+       m.created_at,
+       f.first_order_id,
+       l.last_order_id
+FROM mine m
+JOIN firsts f ON f.customer_id = m.customer_id
+JOIN lasts  l ON l.customer_id = m.customer_id
+ORDER BY m.customer_id, m.created_at, m.id;
+@@@FILE ex7/prompt.md
+## Exercise 7 — what a DELETE would remove
+
+Edit `ex7/solution.sql`.
+
+Works against `customers(id int, name text, email text, country text,
+created_at timestamptz)`, restricted to `id <= 2000`.
+
+Data quality has decided to collapse duplicate names down to one customer
+each, keeping the **lowest id** in every group. Before anyone runs a
+`DELETE`, they want the list of rows it would remove.
+
+That is the entire exercise, and it is also the entire procedure: the
+`SELECT` comes first, you read it, you count it, and only then does it
+become a `DELETE ... USING`.
+
+Illustration, for the duplicate groups from exercise 5:
+
+```
+ id   | name
+------+-------------
+ 1902 | Ana Duarte
+  801 | Mia Okafor
+ 1330 | Mia Okafor
+```
+
+Customer 118 (`Ana Duarte`) and 447 (`Mia Okafor`) survive — they are the
+lowest ids in their groups — and do not appear. A group of three
+contributes two rows to the removal list.
+
+For reference, the `DELETE` this feeds would be:
+
+```sql
+DELETE FROM customers c
+USING (<your query>) doomed
+WHERE c.id = doomed.id;
+```
+
+Note what makes it safe: the victims are named by primary key, and the
+keeper rule is explicit rather than implied. A `DELETE` that omits the
+keeper rule removes every copy including the one you meant to keep.
+
+Columns, in this order: `id`, `name`.
+
+**Ordered by `name` ascending, then `id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex7
+```
+@@@FILE ex7/hints.md
+## Hint 1
+
+Number the rows within each name group by the rule that decides the
+survivor, and then keep everything that is not number one.
+
+## Hint 2
+
+```sql
+row_number() OVER (PARTITION BY name ORDER BY id) AS rn
+```
+
+`rn = 1` is the keeper; `rn > 1` is the removal list. Rows whose name is
+unique get `rn = 1` and are therefore automatically excluded — no extra
+condition needed.
+
+## Hint 3
+
+That last point is worth confirming rather than assuming: a customer with a
+unique name is a group of one, gets number 1, and never reaches the output.
+So the query needs no `count(*) > 1` filter at all. The decision left to you
+is whether to include one anyway for readability, and whether that clarity
+is worth the extra window.
+@@@FILE ex7/importantHints.md
+## Hint 1
+
+Check the arithmetic before you would ever run a delete. Exercise 5 gave you
+the duplicate rows; this query should return exactly that count minus the
+number of distinct duplicated names. If exercise 5 returned 900 rows over
+400 names, this must return 500. If it returns 900, your keeper rule is
+missing and the delete would empty every duplicate group entirely.
+
+## Hint 2
+
+Consider the alternative spelling, which is a good cross-check because it
+uses no window at all:
+
+```sql
+SELECT c.id, c.name
+FROM customers c
+WHERE c.id <= 2000
+  AND EXISTS (SELECT 1 FROM customers k
+               WHERE k.id <= 2000 AND k.name = c.name AND k.id < c.id);
+```
+
+"Remove me if somebody with my name has a lower id." It states the keeper
+rule as a predicate rather than as a ranking, and the two must agree exactly.
+
+## Hint 3
+
+Two procedural habits worth taking away, neither of which the gate can
+check. Run the delete inside a transaction — `BEGIN`, delete, count, then
+`COMMIT` or `ROLLBACK` — because PostgreSQL's DML is transactional and this
+insurance is free. And ask whether the real fix is a `UNIQUE` constraint
+after the cleanup: a deduplication job that runs nightly is usually a
+missing constraint with a cron entry attached.
+@@@FILE ex7/solution.sql
+-- v3a06_dedup_latest_row / ex7 — the rows a name-deduplicating DELETE would remove.
+WITH ranked AS (
+    SELECT id,
+           name,
+           row_number() OVER (PARTITION BY name ORDER BY id) AS rn
+    FROM customers
+    WHERE id <= 2000
+)
+SELECT id,
+       name
+FROM ranked
+WHERE rn > 1
+ORDER BY name, id;
+@@@FILE ex7/expected.sql
+SELECT c.id,
+       c.name
+FROM customers c
+WHERE c.id <= 2000
+  AND EXISTS (
+      SELECT 1
+      FROM customers keeper
+      WHERE keeper.id <= 2000
+        AND keeper.name = c.name
+        AND keeper.id < c.id
+  )
+ORDER BY c.name, c.id;
+@@@FILE ex8/prompt.md
+## Exercise 8 — one row per key, plus an aggregate
+
+Edit `ex8/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `customer_id BETWEEN
+1 AND 20`.
+
+Support wants a customer card: the details of the most recent order,
+alongside lifetime figures for the customer. Two grains in one row — a
+specific order, and a summary of all their orders.
+
+There are two defensible shapes. You can compute everything with windows
+over the same partition in a single pass — a `row_number` to choose the row,
+a `count(*)` and a `sum(total)` to summarise it — or you can rank in one CTE,
+aggregate in another, and join them. The first reads the table once; the
+second states the two grains separately. Pick one and be able to say why.
+
+Ties on `created_at` are broken by the higher `id`.
+
+Illustration:
+
+```
+ customer_id | last_order_id | last_order_at          | last_order_total | lifetime_orders | lifetime_spend
+-------------+---------------+------------------------+------------------+-----------------+---------------
+           1 |        411902 | 2023-09-14 11:02:00+00 |          1204.50 |               9 |        8812.40
+           2 |        388771 | 2023-10-02 06:31:00+00 |           318.90 |              12 |       11908.05
+```
+
+`lifetime_orders` counts every order the customer has, not just the latest
+one, and `lifetime_spend` sums them all — including the last one.
+
+Columns, in this order: `customer_id`, `last_order_id`, `last_order_at`,
+`last_order_total`, `lifetime_orders`, `lifetime_spend`.
+
+**Ordered by `customer_id` ascending.**
+
+```
+uv run dojo test v3a06_dedup_latest_row ex8
+```
+@@@FILE ex8/hints.md
+## Hint 1
+
+Three of the six columns describe one specific order; two describe the
+customer's whole history. Both sets can come from windows over the same
+partition — the difference is whether the window is ordered.
+
+## Hint 2
+
+```sql
+row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC, id DESC) AS rn,
+count(*)    OVER (PARTITION BY customer_id) AS lifetime_orders,
+sum(total)  OVER (PARTITION BY customer_id) AS lifetime_spend
+```
+
+The ordered window picks the row; the unordered ones summarise the partition
+onto every row, including the one that survives.
+
+## Hint 3
+
+Filter `WHERE rn = 1` in an outer level and the lifetime columns come along
+for the ride, already correct. The decision left to you is the alternative:
+`DISTINCT ON` for the latest order joined to a `GROUP BY` for the totals. It
+is two passes and arguably clearer about the two grains — a genuine
+trade-off rather than a right answer.
+@@@FILE ex8/importantHints.md
+## Hint 1
+
+Predict the relationship between the columns and use it as a check:
+`lifetime_spend` must be greater than or equal to `last_order_total` for
+every row, and equal only for a customer with exactly one order. If any row
+shows them equal while `lifetime_orders` is greater than 1, your aggregate
+window is ordered and has become a running total that stops at the current
+row.
+
+## Hint 2
+
+The mistake this exercise is really guarding against is filtering too early:
+
+```sql
+WITH latest AS (SELECT ... WHERE rn = 1)
+SELECT customer_id, count(*), sum(total) FROM latest GROUP BY customer_id;
+```
+
+That aggregates the *surviving* rows, so `lifetime_orders` is 1 for
+everybody. Aggregates over a set that has already been reduced to one row
+per key describe the reduction, not the history. Whatever shape you choose,
+the summary must be computed over all the orders.
+
+## Hint 3
+
+Worth thinking about at scale: the single-pass window version sorts the
+whole slice once and computes three windows over it — but two of those
+windows are unordered, so PostgreSQL can compute them in the same
+`WindowAgg` pass as the ordered one only if the partitioning matches, which
+here it does. The join version sorts twice (once to rank, once to group).
+Check the plans if you are curious; on twenty customers the difference is
+noise, and on twenty million it is the query.
+@@@FILE ex8/solution.sql
+-- v3a06_dedup_latest_row / ex8 — the latest order plus lifetime totals, one pass.
+WITH annotated AS (
+    SELECT customer_id,
+           id,
+           created_at,
+           total,
+           row_number() OVER (PARTITION BY customer_id
+                              ORDER BY created_at DESC, id DESC) AS rn,
+           count(*)   OVER (PARTITION BY customer_id) AS lifetime_orders,
+           sum(total) OVER (PARTITION BY customer_id) AS lifetime_spend
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 20
+)
+SELECT customer_id,
+       id         AS last_order_id,
+       created_at AS last_order_at,
+       total      AS last_order_total,
+       lifetime_orders,
+       lifetime_spend
+FROM annotated
+WHERE rn = 1
+ORDER BY customer_id;
+@@@FILE ex8/expected.sql
+WITH mine AS (
+    SELECT customer_id, id, created_at, total
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 20
+),
+latest AS (
+    SELECT DISTINCT ON (customer_id)
+           customer_id, id, created_at, total
+    FROM mine
+    ORDER BY customer_id, created_at DESC, id DESC
+),
+totals AS (
+    SELECT customer_id,
+           count(*)   AS lifetime_orders,
+           sum(total) AS lifetime_spend
+    FROM mine
+    GROUP BY customer_id
+)
+SELECT l.customer_id,
+       l.id         AS last_order_id,
+       l.created_at AS last_order_at,
+       l.total      AS last_order_total,
+       t.lifetime_orders,
+       t.lifetime_spend
+FROM latest l
+JOIN totals t ON t.customer_id = l.customer_id
+ORDER BY l.customer_id;
+@@@FILE challenge/prompt.md
+## Challenge — latest review per product, with context
+
+Edit `challenge/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)` — 1,000,000 rows over 10,000 products, so roughly a
+hundred reviews each. Restrict to `product_id <= 50`.
+
+Merchandising wants a product card for each of those fifty products: the
+most recent review — when it arrived and what it scored — alongside the
+product's overall standing, its average rating and how many reviews it has.
+
+Same combination as exercise 8, on a table twenty times larger and with a
+rounded aggregate. Ties on `created_at` are broken by the higher `id`.
+
+Illustration:
+
+```
+ product_id | last_review_id | last_review_at         | last_rating | reviews | avg_rating
+------------+----------------+------------------------+-------------+---------+-----------
+          1 |         918442 | 2023-11-09 21:14:00+00 |           4 |     104 |       3.02
+          2 |         722013 | 2023-10-27 04:48:00+00 |           1 |      96 |       2.94
+```
+
+`avg_rating` is the mean of every rating the product has, rounded to 2
+decimals — `avg` over an `integer` column returns `numeric`, so `round(...,
+2)` applies with no cast. `reviews` counts the whole history, not the latest
+review.
+
+Exactly fifty rows: every product in the range has reviews.
+
+Columns, in this order: `product_id`, `last_review_id`, `last_review_at`,
+`last_rating`, `reviews`, `avg_rating`.
+
+**Ordered by `product_id` ascending.** (50 rows.)
+
+```
+uv run dojo test v3a06_dedup_latest_row challenge
+```
+@@@FILE challenge/hints.md
+## Hint 1
+
+Two grains again: one specific review, and a summary of all of them. You
+have written this shape once; the new decisions are the rounding and the
+scale.
+
+## Hint 2
+
+```sql
+row_number() OVER (PARTITION BY product_id ORDER BY created_at DESC, id DESC) AS rn,
+count(*)                OVER (PARTITION BY product_id) AS reviews,
+round(avg(rating) OVER (PARTITION BY product_id), 2)   AS avg_rating
+```
+
+`round` may wrap a window aggregate directly — it is an ordinary expression
+in the select list.
+
+## Hint 3
+
+The `product_id <= 50` filter belongs inside the windowed query, not outside
+it: it removes whole partitions, so it cannot change any surviving row's
+rank, and it means the sort handles five thousand rows instead of a million.
+The decision left to you is whether to write this with windows in one pass
+or with `DISTINCT ON` joined to a `GROUP BY`; at this size, measure rather
+than guess.
+@@@FILE challenge/importantHints.md
+## Hint 1
+
+Sanity-check with an independent query before trusting the card:
+
+```sql
+SELECT count(*), round(avg(rating), 2) FROM reviews WHERE product_id = 1;
+```
+
+Those two numbers must match product 1's row exactly. One product verified
+by hand is worth more than reading fifty rows and finding them plausible.
+
+## Hint 2
+
+The scale changes one thing materially. With no index on `reviews
+(product_id, created_at)`, both shapes begin with a sequential scan of a
+million rows; the filter reduces that to about five thousand before any sort
+happens. What you must not do is filter after the window — that would sort
+all million rows and then discard 99.5% of them. Predicates that can run
+before a window should.
+
+## Hint 3
+
+One thing worth predicting before you run it: `avg_rating` will sit close to
+3.00 for nearly every product, because the ratings are near-uniform across 1
+to 5. That is a property of this dataset, not of your query — but it means a
+product whose average is 3.00 tells you nothing, and an averages column that
+is *identical* on all fifty rows means your window is not partitioned.
+@@@FILE challenge/solution.sql
+-- v3a06_dedup_latest_row / challenge — latest review per product, with standing.
+WITH annotated AS (
+    SELECT product_id,
+           id,
+           created_at,
+           rating,
+           row_number() OVER (PARTITION BY product_id
+                              ORDER BY created_at DESC, id DESC) AS rn,
+           count(*) OVER (PARTITION BY product_id)               AS reviews,
+           round(avg(rating) OVER (PARTITION BY product_id), 2)  AS avg_rating
+    FROM reviews
+    WHERE product_id <= 50
+)
+SELECT product_id,
+       id         AS last_review_id,
+       created_at AS last_review_at,
+       rating     AS last_rating,
+       reviews,
+       avg_rating
+FROM annotated
+WHERE rn = 1
+ORDER BY product_id;
+@@@FILE challenge/expected.sql
+WITH mine AS (
+    SELECT product_id, id, created_at, rating
+    FROM reviews
+    WHERE product_id <= 50
+),
+latest AS (
+    SELECT DISTINCT ON (product_id)
+           product_id, id, created_at, rating
+    FROM mine
+    ORDER BY product_id, created_at DESC, id DESC
+),
+standing AS (
+    SELECT product_id,
+           count(*)              AS reviews,
+           round(avg(rating), 2) AS avg_rating
+    FROM mine
+    GROUP BY product_id
+)
+SELECT l.product_id,
+       l.id         AS last_review_id,
+       l.created_at AS last_review_at,
+       l.rating     AS last_rating,
+       s.reviews,
+       s.avg_rating
+FROM latest l
+JOIN standing s ON s.product_id = l.product_id
+ORDER BY l.product_id;
+@@@FILE review1/prompt.md
+## Spaced review
+
+Edit `review1/solution.sql`.
+
+Works against `products(id int, name text, category text, price
+numeric(10,2), description text, attributes jsonb)` — 10,000 rows across the
+six categories `books`, `clothing`, `electronics`, `food`, `garden`, `toys`.
+
+Merchandising wants the flagship: the single most expensive product in each
+category. Six rows. Ties on `price` are broken by the **lower** `id`.
+
+Use `DISTINCT ON`, and remember its rule — the `ORDER BY` must begin with
+the `DISTINCT ON` expressions, and everything after that decides which row
+survives. An `ORDER BY` that stops at `category` would still run and would
+still return six rows, and they would be arbitrary ones.
+
+Illustration:
+
+```
+ category    | id   | name              | price
+-------------+------+-------------------+--------
+ books       | 8123 | Vega Atlas 447    | 499.62
+ clothing    | 4410 | Aero Jacket 220   | 499.80
+ electronics | 1902 | Nova Receiver 12  | 499.71
+```
+
+Columns, in this order: `category`, `id`, `name`, `price`.
+
+**Ordered by `category` ascending.** (6 rows.)
+
+```
+uv run dojo test v3a06_dedup_latest_row review1
+```
+@@@FILE review1/hints.md
+## Hint 1
+
+One row per group, chosen by an ordering. One query level, two clauses that
+must agree.
+
+## Hint 2
+
+```sql
+SELECT DISTINCT ON (k) k, a, b
+FROM t
+ORDER BY k, a DESC, b;
+```
+
+Read it as: cluster by `k`, sort within the cluster by `a DESC, b`, keep the
+first row of each cluster.
+
+## Hint 3
+
+The tie-break here is `id` **ascending** while the price is descending —
+they do not have to point the same way, and the prompt says which. The
+decision left to you is whether to also write the `row_number` version and
+compare; the two must return identical rows, and if they do not, one of the
+orderings is not total.
+@@@FILE review1/importantHints.md
+## Hint 1
+
+Start from what could go wrong rather than from the syntax. There are
+exactly two ways to break a `DISTINCT ON`: mismatch the leading `ORDER BY`
+expressions, which errors loudly, or omit the discriminating tail, which
+returns arbitrary rows silently. Write your `ORDER BY` and check it against
+both failure modes before running anything.
+
+## Hint 2
+
+A useful independent check: the six prices your query returns must equal
+
+```sql
+SELECT category, max(price) FROM products GROUP BY category;
+```
+
+That aggregate gives the values without the rows — which is precisely why
+you needed `DISTINCT ON` in the first place, and why comparing the two is a
+proper verification rather than a restatement.
+
+## Hint 3
+
+One closing thought that ties the sector together: this query is the N = 1
+case of "top N per group". Change the requirement to "the two most expensive
+per category" and `DISTINCT ON` cannot help you at all — you are back to a
+ranking window in a subquery, which is sector v3a02_ranking_top_n. Knowing
+which tool stops working when the requirement changes by one word is most of
+what experience buys you here.
+@@@FILE review1/solution.sql
+-- v3a06_dedup_latest_row / review1 — the dearest product in each category.
+SELECT DISTINCT ON (category)
+       category,
+       id,
+       name,
+       price
+FROM products
+ORDER BY category, price DESC, id;
+@@@FILE review1/expected.sql
+WITH ranked AS (
+    SELECT category,
+           id,
+           name,
+           price,
+           row_number() OVER (PARTITION BY category
+                              ORDER BY price DESC, id) AS rn
+    FROM products
+)
+SELECT category, id, name, price
+FROM ranked
+WHERE rn = 1
+ORDER BY category;

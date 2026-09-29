@@ -1,1 +1,0 @@
--- 33_left_prefix/ex4: your CREATE INDEX here (see README.md)

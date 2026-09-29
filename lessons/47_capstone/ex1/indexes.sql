@@ -1,1 +1,0 @@
--- 47_capstone/ex1: your index design here - justify every line

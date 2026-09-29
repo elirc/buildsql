@@ -1,1 +1,0 @@
-VACUUM bloat_orders;

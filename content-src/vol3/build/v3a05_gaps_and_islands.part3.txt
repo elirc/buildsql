@@ -1,0 +1,945 @@
+@@@FILE ex5/prompt.md
+## Exercise 5 — runs of a condition
+
+Edit `ex5/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, restricted to `status = 'paid'` and
+`created_at >= '2023-01-01'` — the eleven months January to November 2023,
+rolled up to one row per month.
+
+Finance wants the winning streaks: every maximal run of consecutive months
+in which `paid` revenue was **higher than the month before**.
+
+This is an islands problem where the thing being run-detected is not a value
+in the data but a computed condition. The construction has three steps:
+compute the flag with `lag`, keep only the rows where it is true, then apply
+the islands trick to *those* months.
+
+Illustration on eight months:
+
+```
+   month    | revenue | rising
+------------+---------+--------
+ 2023-01-01 |   100   |          <- no previous month, so not rising
+ 2023-02-01 |   120   | t
+ 2023-03-01 |   150   | t
+ 2023-04-01 |   140   | f
+ 2023-05-01 |   160   | t
+ 2023-06-01 |   155   | f
+ 2023-07-01 |   170   | t
+ 2023-08-01 |   180   | t
+```
+
+giving:
+
+```
+ start_month | end_month  | months
+-------------+------------+--------
+ 2023-02-01  | 2023-03-01 |      2
+ 2023-05-01  | 2023-05-01 |      1
+ 2023-07-01  | 2023-08-01 |      2
+```
+
+January is not rising — `lag` returns NULL, the comparison is unknown, and
+`WHERE rising` keeps only rows that are true.
+
+For the group key, months are dates one month apart, so the day-arithmetic
+version of the trick does not apply. Subtract an interval instead:
+`month - (row_number() OVER (ORDER BY month) * INTERVAL '1 month')`.
+
+Columns, in this order: `start_month` (a `date`), `end_month` (a `date`),
+`months` (how many consecutive rising months the run contains).
+
+**Ordered by `start_month` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex5
+```
+@@@FILE ex5/hints.md
+## Hint 1
+
+The rows you want to group into runs are not all the months — they are the
+rising ones. Reduce to that subset first, and then the problem is exactly
+exercise 3 with a coarser calendar.
+
+## Hint 2
+
+The flag:
+
+```sql
+SELECT month, revenue,
+       revenue > lag(revenue) OVER (ORDER BY month) AS rising
+FROM monthly;
+```
+
+Boolean-valued window arithmetic is ordinary. The first row's value is NULL,
+not false, and that distinction does the right thing when you filter.
+
+## Hint 3
+
+Once you have the rising months, the key is
+`month - (row_number() OVER (ORDER BY month) * INTERVAL '1 month')`. That
+expression is a `timestamp`, which is fine — a group key is never displayed
+and never needs a tidy type. The decision left to you is whether to filter
+with `WHERE rising` or `WHERE rising IS TRUE`; they behave identically here,
+and one of them says out loud what it is doing about the NULL.
+@@@FILE ex5/importantHints.md
+## Hint 1
+
+Predict a property first: the number of rising months in your runs must
+equal the number of rows where the flag is true, and that is at most ten,
+because January can never qualify. `sum(months)` over your output is a
+one-line check of the whole pipeline.
+
+## Hint 2
+
+Now the mistake that produces plausible nonsense. Suppose you skip the
+filtering step and apply the row-number trick to all eleven months, using
+`rising` as an extra grouping column. Every non-rising month becomes its own
+"run", and consecutive rising months separated by a falling one can share a
+key, because the row numbers kept counting through the rows you did not
+want. Filtering *before* numbering is what makes the counter mean "the nth
+rising month".
+
+## Hint 3
+
+If you would rather avoid the interval arithmetic entirely, there is a
+second route: number the rising months and, separately, number all months,
+then subtract — the dual-row-number trick from exercise 8, applied to a
+boolean. It is more machinery for the same answer here, but it is the shape
+you need when the run rule cannot be reduced to a filter.
+@@@FILE ex5/solution.sql
+-- v3a05_gaps_and_islands / ex5 — streaks of consecutive rising months.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE status = 'paid'
+      AND created_at >= '2023-01-01'
+    GROUP BY 1
+),
+flagged AS (
+    SELECT month,
+           revenue > lag(revenue) OVER (ORDER BY month) AS rising
+    FROM monthly
+),
+rising_only AS (
+    SELECT month FROM flagged WHERE rising
+),
+keyed AS (
+    SELECT month,
+           month - (row_number() OVER (ORDER BY month) * INTERVAL '1 month') AS grp
+    FROM rising_only
+)
+SELECT min(month) AS start_month,
+       max(month) AS end_month,
+       count(*)   AS months
+FROM keyed
+GROUP BY grp
+ORDER BY start_month;
+@@@FILE ex5/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           sum(total)                            AS revenue
+    FROM orders
+    WHERE status = 'paid'
+      AND created_at >= '2023-01-01'
+    GROUP BY 1
+),
+rising_only AS (
+    SELECT month
+    FROM (
+        SELECT month,
+               revenue,
+               lag(revenue) OVER (ORDER BY month) AS prev_revenue
+        FROM monthly
+    ) t
+    WHERE prev_revenue IS NOT NULL
+      AND revenue > prev_revenue
+),
+flagged AS (
+    SELECT month,
+           CASE WHEN lag(month) OVER (ORDER BY month) IS NULL
+                  OR lag(month) OVER (ORDER BY month) <> month - INTERVAL '1 month'
+                THEN 1 ELSE 0 END AS new_run
+    FROM rising_only
+),
+numbered AS (
+    SELECT month,
+           sum(new_run) OVER (ORDER BY month) AS run_no
+    FROM flagged
+)
+SELECT min(month) AS start_month,
+       max(month) AS end_month,
+       count(*)   AS months
+FROM numbered
+GROUP BY run_no
+ORDER BY start_month;
+@@@FILE ex6/prompt.md
+## Exercise 6 — the longest streak per entity
+
+Edit `ex6/solution.sql`.
+
+Works against the same input as exercise 4: `reviews` restricted to
+`product_id <= 3`, reduced to distinct (`product_id`, `day`) pairs.
+
+Product quality wants only the headline: for each of the three products, its
+single longest consecutive-day review streak. Ties are broken by the
+**earliest** `start_day`, so the answer is exactly three rows.
+
+Illustration, given the runs from exercise 4:
+
+```
+ product_id | start_day  | end_day    | days
+------------+------------+------------+------
+          1 | 2023-03-02 | 2023-03-04 |    3
+          2 | 2023-05-19 | 2023-05-21 |    3
+          3 | 2023-01-08 | 2023-01-09 |    2
+```
+
+Two levels of aggregation are involved and it helps to name them: rows
+become runs, then runs become "the best run". The second step is a top-N
+per group with N = 1 — the shape from sector v3a02_ranking_top_n — and it
+needs the same care about tie-breaks that every top-N does.
+
+Columns, in this order: `product_id`, `start_day` (a `date`), `end_day` (a
+`date`), `days`.
+
+**Ordered by `product_id` ascending.** (3 rows.)
+
+```
+uv run dojo test v3a05_gaps_and_islands ex6
+```
+@@@FILE ex6/hints.md
+## Hint 1
+
+You already know how to produce every run per product. This exercise adds
+one more stage on top of that result, and the new stage does not care how
+the runs were computed.
+
+## Hint 2
+
+Picking one row per group by a ranking:
+
+```sql
+SELECT * FROM (
+    SELECT product_id, start_day, end_day, days,
+           row_number() OVER (PARTITION BY product_id
+                              ORDER BY days DESC, start_day) AS rn
+    FROM runs
+) t
+WHERE rn = 1;
+```
+
+The filter is outside because the rank does not exist inside.
+
+## Hint 3
+
+The tie-break belongs in the window's `ORDER BY`, not just in the output
+ordering — with two runs of equal length, the window decides *which one
+survives*, and sorting afterwards cannot undo an arbitrary choice. The
+decision left to you: `row_number` or `DISTINCT ON (product_id)`? Both give
+exactly one row per product; sector v3a06_dedup_latest_row is about the
+difference.
+@@@FILE ex6/importantHints.md
+## Hint 1
+
+Check the row count first: exactly 3. If you get more, either the tie-break
+is missing or you used `rank`, which keeps every run tied for longest. If
+you get fewer, a product has no review days at all — worth confirming
+against the input rather than assuming.
+
+## Hint 2
+
+There is a tempting shortcut that does not work:
+
+```sql
+SELECT product_id, max(days) AS days FROM runs GROUP BY product_id;
+```
+
+That gives you the *length* of the best run but not its dates, and you
+cannot add `start_day` to the select list — it is not functionally
+determined by `product_id`. This is the classic "an aggregate cannot produce
+a row" wall, and window functions exist partly to get past it.
+
+## Hint 3
+
+If you want the join-back version as a cross-check, it takes two conditions:
+join the runs to the per-product maximum length, then eliminate ties with a
+`NOT EXISTS` that looks for an equally long run starting earlier. Writing it
+is a good way to appreciate how much the window version compresses.
+@@@FILE ex6/solution.sql
+-- v3a05_gaps_and_islands / ex6 — each product's longest review streak.
+WITH days AS (
+    SELECT DISTINCT product_id,
+                    date_trunc('day', created_at)::date AS day
+    FROM reviews
+    WHERE product_id <= 3
+),
+keyed AS (
+    SELECT product_id,
+           day,
+           day - (row_number() OVER (PARTITION BY product_id
+                                     ORDER BY day))::int AS grp
+    FROM days
+),
+runs AS (
+    SELECT product_id,
+           min(day) AS start_day,
+           max(day) AS end_day,
+           count(*) AS days
+    FROM keyed
+    GROUP BY product_id, grp
+),
+ranked AS (
+    SELECT product_id, start_day, end_day, days,
+           row_number() OVER (PARTITION BY product_id
+                              ORDER BY days DESC, start_day) AS rn
+    FROM runs
+)
+SELECT product_id, start_day, end_day, days
+FROM ranked
+WHERE rn = 1
+ORDER BY product_id;
+@@@FILE ex6/expected.sql
+WITH days AS (
+    SELECT DISTINCT product_id,
+                    date_trunc('day', created_at)::date AS day
+    FROM reviews
+    WHERE product_id <= 3
+),
+keyed AS (
+    SELECT product_id,
+           day,
+           day - (row_number() OVER (PARTITION BY product_id
+                                     ORDER BY day))::int AS grp
+    FROM days
+),
+runs AS (
+    SELECT product_id,
+           min(day) AS start_day,
+           max(day) AS end_day,
+           count(*) AS days
+    FROM keyed
+    GROUP BY product_id, grp
+),
+best AS (
+    SELECT product_id, max(days) AS days
+    FROM runs
+    GROUP BY product_id
+)
+SELECT r.product_id, r.start_day, r.end_day, r.days
+FROM runs r
+JOIN best b ON b.product_id = r.product_id AND b.days = r.days
+WHERE NOT EXISTS (
+    SELECT 1 FROM runs r2
+     WHERE r2.product_id = r.product_id
+       AND r2.days       = r.days
+       AND r2.start_day  < r.start_day
+)
+ORDER BY r.product_id;
+@@@FILE ex7/prompt.md
+## Exercise 7 — sessions
+
+Edit `ex7/solution.sql`.
+
+Works against `events(id bigint, customer_id int, event_type text, payload
+jsonb, ts timestamptz)` — 3,000,000 rows, one event per second, `ts`
+strictly increasing with `id`. Restrict to `customer_id BETWEEN 1 AND 3`,
+which gives roughly sixty events per customer spread over five weeks.
+
+Analytics wants those events grouped into **sessions**, where a session ends
+whenever more than twelve hours pass with no activity from that customer.
+This exercise produces the per-event assignment; the challenge summarises
+it.
+
+The row-number trick does not apply — there is no fixed step between
+consecutive events. The general construction does:
+
+1. For each event, the gap since that customer's previous event (`lag`).
+2. A flag: 1 if this event starts a new session, 0 otherwise. It starts one
+   if the gap exceeds twelve hours **or** there is no previous event at all.
+3. A running sum of the flag within the customer. That sum is the session
+   number, starting at 1.
+
+Illustration for one customer:
+
+```
+ id     | ts                     | gap_from_prev | new_session | session_no
+--------+------------------------+---------------+-------------+-----------
+  10432 | 2023-10-11 04:53:00+00 |               |           1 |          1
+  88120 | 2023-10-11 09:12:00+00 | 04:19:00      |           0 |          1
+ 201933 | 2023-10-12 06:40:00+00 | 21:28:00      |           1 |          2
+ 244100 | 2023-10-12 07:02:00+00 | 00:22:00      |           0 |          2
+```
+
+Without the `IS NULL` half of the flag, the first event of each customer
+would score 0 and their sessions would be numbered from 0 while everyone
+else's started at 1.
+
+Columns, in this order: `customer_id`, `id`, `ts`, `gap_from_prev` (an
+`interval`, NULL for a customer's first event), `session_no` (a running
+count starting at 1 within each customer).
+
+**Ordered by `customer_id` ascending, then `ts` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex7
+```
+@@@FILE ex7/hints.md
+## Hint 1
+
+Two window passes, one after the other. The first looks backwards one row to
+decide "is this a new session?". The second turns those yes/no answers into
+numbers.
+
+## Hint 2
+
+The second pass is a running total of a flag:
+
+```sql
+sum(new_session) OVER (PARTITION BY customer_id ORDER BY ts) AS session_no
+```
+
+Every 1 bumps the number; every 0 leaves it alone. That is why the flag has
+to be 1 on the *first* row of each customer.
+
+## Hint 3
+
+`ts - lag(ts) OVER w` is an `interval`, and comparing it to `INTERVAL '12
+hours'` is a normal comparison — no `extract`, no cast. The decision left to
+you is the boundary: is a gap of exactly twelve hours a new session or a
+continuation? The prompt says "more than twelve hours", which picks a strict
+comparison; say so in the query rather than leaving it to chance.
+@@@FILE ex7/importantHints.md
+## Hint 1
+
+Start from the flag and reason about the first row. `lag(ts)` is NULL there,
+so `ts - NULL` is NULL, so `NULL > INTERVAL '12 hours'` is unknown, so a
+plain `CASE WHEN gap > interval THEN 1 ELSE 0 END` falls through to `ELSE`
+and produces 0. The running sum then starts at 0 for that customer. Adding
+`lag(ts) IS NULL` as an alternative condition is not a nicety; it is what
+makes the numbering start at 1.
+
+## Hint 2
+
+Watch the partitioning in both windows. If the `lag` is partitioned but the
+`sum` is not, the session numbers keep climbing across customers — customer
+2's first session might be number 14. If the `sum` is partitioned but the
+`lag` is not, customer 2's first event is compared to customer 1's last and
+may not be flagged at all. Both windows need the same `PARTITION BY`, and
+writing them with a shared `WINDOW` clause is the cheapest way to guarantee
+it.
+
+## Hint 3
+
+A note on cost that is more encouraging than you might expect: both windows
+use the same `PARTITION BY customer_id ORDER BY ts`, so PostgreSQL sorts
+once and runs two `WindowAgg` nodes over that single ordering. The
+"expensive-looking" general construction is one sort, exactly like the
+row-number trick. What would cost you a second sort is ordering the two
+windows differently — say one by `ts` and the other by `id` — which is easy
+to do by accident and produces the same answer for twice the work.
+@@@FILE ex7/solution.sql
+-- v3a05_gaps_and_islands / ex7 — sessionising events on a 12-hour idle gap.
+WITH ev AS (
+    SELECT customer_id, id, ts
+    FROM events
+    WHERE customer_id BETWEEN 1 AND 3
+),
+flagged AS (
+    SELECT customer_id,
+           id,
+           ts,
+           ts - lag(ts) OVER w AS gap_from_prev,
+           CASE WHEN lag(ts) OVER w IS NULL
+                  OR ts - lag(ts) OVER w > INTERVAL '12 hours'
+                THEN 1 ELSE 0 END AS new_session
+    FROM ev
+    WINDOW w AS (PARTITION BY customer_id ORDER BY ts)
+)
+SELECT customer_id,
+       id,
+       ts,
+       gap_from_prev,
+       sum(new_session) OVER (PARTITION BY customer_id ORDER BY ts) AS session_no
+FROM flagged
+ORDER BY customer_id, ts;
+@@@FILE ex7/expected.sql
+WITH ev AS (
+    SELECT customer_id, id, ts
+    FROM events
+    WHERE customer_id BETWEEN 1 AND 3
+),
+flagged AS (
+    SELECT customer_id,
+           id,
+           ts,
+           ts - lag(ts) OVER (PARTITION BY customer_id ORDER BY ts) AS gap_from_prev
+    FROM ev
+),
+starts AS (
+    SELECT customer_id, ts
+    FROM flagged
+    WHERE gap_from_prev IS NULL
+       OR gap_from_prev > INTERVAL '12 hours'
+)
+SELECT f.customer_id,
+       f.id,
+       f.ts,
+       f.gap_from_prev,
+       (SELECT count(*)
+          FROM starts s
+         WHERE s.customer_id = f.customer_id
+           AND s.ts <= f.ts) AS session_no
+FROM flagged f
+ORDER BY f.customer_id, f.ts;
+@@@FILE ex8/prompt.md
+## Exercise 8 — runs of an unchanged value
+
+Edit `ex8/solution.sql`.
+
+Works against `reviews(id int, product_id int, rating int, body text,
+created_at timestamptz)`, restricted to `product_id = 1` — roughly a hundred
+reviews, each with a rating from 1 to 5, in time order.
+
+Product quality wants the streaks where the rating did not change: two or
+more consecutive reviews (in `created_at, id` order) that all gave the same
+score. Runs of a single review are not interesting and must be excluded.
+
+The values here are not consecutive integers, so the difference trick from
+exercise 2 does not apply directly. The construction that does is **two**
+row numbers:
+
+```
+ created_at | rating | rn_all | rn_by_rating | rn_all - rn_by_rating
+------------+--------+--------+--------------+----------------------
+ t1         |      5 |      1 |            1 |                     0
+ t2         |      5 |      2 |            2 |                     0
+ t3         |      3 |      3 |            1 |                     2
+ t4         |      5 |      4 |            3 |                     1
+ t5         |      5 |      5 |            4 |                     1
+ t6         |      3 |      6 |            2 |                     4
+```
+
+While the rating holds, both counters advance together and their difference
+is constant. When the rating changes, only the global counter advances and
+the difference moves. The two runs of 5s get keys 0 and 1 — correctly kept
+apart — which is why the key alone is not enough: **group by the rating and
+the key**, since a 3 and a 5 could produce the same difference on a longer
+series.
+
+Given the illustration, the output would be:
+
+```
+ rating | run_start | run_end | run_length
+--------+-----------+---------+-----------
+      5 | t1        | t2      |          2
+      5 | t4        | t5      |          2
+```
+
+Columns, in this order: `rating`, `run_start` (the `created_at` of the run's
+first review), `run_end` (the last), `run_length`. Keep only runs of length
+2 or more.
+
+**Ordered by `run_start` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands ex8
+```
+@@@FILE ex8/hints.md
+## Hint 1
+
+You need something that stays the same while the rating stays the same. One
+counter that always advances, and one that only advances within a rating,
+have exactly that property in their difference.
+
+## Hint 2
+
+```sql
+row_number() OVER (ORDER BY created_at, id)                        AS rn_all,
+row_number() OVER (PARTITION BY rating ORDER BY created_at, id)    AS rn_by_rating
+```
+
+Both windows share an ordering, so PostgreSQL sorts once. Subtract them and
+you have the key.
+
+## Hint 3
+
+Group by `rating` and the key together, aggregate with `min`, `max` and
+`count(*)`, and filter the short runs with `HAVING count(*) >= 2` — not
+`WHERE`, because the length is a property of the group and does not exist
+until after grouping. The decision left to you is the tie-break in both
+window orderings: they must be identical, or the two counters disagree about
+what "next" means.
+@@@FILE ex8/importantHints.md
+## Hint 1
+
+Do not take the trick on trust — write out six rows by hand, as the prompt's
+table does, and watch the two counters. Specifically, check that the *second*
+run of 5s gets a different key from the first. If it did not, the query
+would report one run of four reviews spanning a rating change, which is the
+failure mode this construction exists to avoid.
+
+## Hint 2
+
+Now the mistake: `GROUP BY grp` alone. On a hundred reviews with five
+ratings, two different ratings will eventually produce the same difference,
+and their runs will be merged into a single group whose `min` and `max` come
+from unrelated reviews. Adding `rating` to the `GROUP BY` costs nothing and
+makes the query sound.
+
+## Hint 3
+
+The alternative construction, worth writing once for comparison: flag each
+review where the rating differs from the previous one, then take a running
+sum of the flag. It is the same shape as exercise 7's sessions, with "the
+value changed" as the boundary rule instead of "too much time passed". Both
+are correct; the flag version generalises to rules involving several columns,
+and the dual row number is shorter when the rule is exactly "this column
+stayed the same".
+@@@FILE ex8/solution.sql
+-- v3a05_gaps_and_islands / ex8 — runs of consecutive reviews with the same rating.
+WITH r AS (
+    SELECT id, created_at, rating
+    FROM reviews
+    WHERE product_id = 1
+),
+keyed AS (
+    SELECT created_at,
+           rating,
+           row_number() OVER (ORDER BY created_at, id)
+         - row_number() OVER (PARTITION BY rating ORDER BY created_at, id) AS grp
+    FROM r
+)
+SELECT rating,
+       min(created_at) AS run_start,
+       max(created_at) AS run_end,
+       count(*)        AS run_length
+FROM keyed
+GROUP BY rating, grp
+HAVING count(*) >= 2
+ORDER BY run_start;
+@@@FILE ex8/expected.sql
+WITH r AS (
+    SELECT id, created_at, rating
+    FROM reviews
+    WHERE product_id = 1
+),
+flagged AS (
+    SELECT id,
+           created_at,
+           rating,
+           CASE WHEN lag(rating) OVER w IS NULL
+                  OR lag(rating) OVER w <> rating
+                THEN 1 ELSE 0 END AS new_run
+    FROM r
+    WINDOW w AS (ORDER BY created_at, id)
+),
+numbered AS (
+    SELECT created_at,
+           rating,
+           sum(new_run) OVER (ORDER BY created_at, id) AS run_no
+    FROM flagged
+)
+SELECT rating,
+       min(created_at) AS run_start,
+       max(created_at) AS run_end,
+       count(*)        AS run_length
+FROM numbered
+GROUP BY rating, run_no
+HAVING count(*) >= 2
+ORDER BY run_start;
+@@@FILE challenge/prompt.md
+## Challenge — session summaries
+
+Edit `challenge/solution.sql`.
+
+Works against `events(id bigint, customer_id int, event_type text, payload
+jsonb, ts timestamptz)`, restricted to `customer_id BETWEEN 1 AND 3`, with
+the same twelve-hour idle rule as exercise 7.
+
+Analytics now wants one row per **session** rather than per event, and only
+the substantial ones: sessions containing three or more events.
+
+Illustration:
+
+```
+ customer_id | session_no | started_at             | ended_at               | events | minutes
+-------------+------------+------------------------+------------------------+--------+---------
+           1 |          1 | 2023-10-11 04:53:00+00 | 2023-10-11 09:12:00+00 |      4 |  259.00
+           1 |          3 | 2023-10-14 11:02:00+00 | 2023-10-14 19:44:00+00 |      6 |  522.00
+           2 |          2 | 2023-10-12 06:40:00+00 | 2023-10-12 07:02:00+00 |      3 |   22.00
+```
+
+Note that session numbers are **not** renumbered after filtering — customer
+1's session 2 is missing because it had fewer than three events, and session
+3 keeps its original number. The numbering describes the customer's history,
+not the report.
+
+`minutes` is the wall-clock span of the session: the difference between its
+last and first event, in minutes, rounded to 2 decimals. Subtracting two
+`timestamptz` values gives an `interval`; flatten it with `extract(epoch
+FROM ...)`, divide by 60, and cast to `numeric` before rounding, because
+`round(double precision, integer)` does not exist. A session whose events
+share a timestamp has a span of `0.00`, not NULL.
+
+Columns, in this order: `customer_id`, `session_no`, `started_at`,
+`ended_at`, `events` (event count), `minutes`.
+
+**Ordered by `customer_id` ascending, then `session_no` ascending.**
+
+```
+uv run dojo test v3a05_gaps_and_islands challenge
+```
+@@@FILE challenge/hints.md
+## Hint 1
+
+Everything up to the session number you have already written. This adds one
+aggregation stage on top of it and one filter after that.
+
+## Hint 2
+
+The aggregation:
+
+```sql
+SELECT customer_id, session_no,
+       min(ts) AS started_at, max(ts) AS ended_at, count(*) AS events
+FROM sessions
+GROUP BY customer_id, session_no
+HAVING count(*) >= 3;
+```
+
+`HAVING`, not `WHERE`: the count is a property of the group.
+
+## Hint 3
+
+For the duration, `max(ts) - min(ts)` inside the same aggregate query is an
+`interval`. Wrap it: `round(extract(epoch FROM max(ts) - min(ts))::numeric /
+60, 2)`. The decision left to you is whether to compute it in the grouping
+query or in a wrapper — both work, and only one of them lets you reuse
+`started_at` and `ended_at` by name.
+@@@FILE challenge/importantHints.md
+## Hint 1
+
+Build it in stages and check the row count at each one. Roughly 180 events
+for three customers; some number of sessions after grouping; fewer after the
+`HAVING`. If the session count equals the event count, your idle threshold
+is effectively infinite in the wrong direction — check the comparison
+operator. If it equals three, every customer has exactly one session and the
+threshold is too generous for the data.
+
+## Hint 2
+
+The instruction not to renumber is a deliberate design decision worth
+noticing. Renumbering after filtering would make the report internally tidy
+and externally useless: a session id that changes depending on which filter
+was applied cannot be joined to anything or referenced in a conversation.
+Identifiers should be properties of the data, not of the query that
+displayed it.
+
+## Hint 3
+
+One correctness detail in the duration: a session with a single event has
+`max(ts) = min(ts)` and a span of exactly zero — but such sessions are
+filtered out here by the `HAVING`, so it cannot arise. If you relax the
+filter to explore, check that those rows show `0.00` rather than NULL;
+`extract(epoch FROM interval '0')` is `0`, and a NULL there would mean your
+subtraction produced NULL, which means one of the timestamps was NULL, which
+means something upstream is wrong.
+@@@FILE challenge/solution.sql
+-- v3a05_gaps_and_islands / challenge — one row per session, substantial ones only.
+WITH ev AS (
+    SELECT customer_id, id, ts
+    FROM events
+    WHERE customer_id BETWEEN 1 AND 3
+),
+flagged AS (
+    SELECT customer_id,
+           ts,
+           CASE WHEN lag(ts) OVER w IS NULL
+                  OR ts - lag(ts) OVER w > INTERVAL '12 hours'
+                THEN 1 ELSE 0 END AS new_session
+    FROM ev
+    WINDOW w AS (PARTITION BY customer_id ORDER BY ts)
+),
+sessions AS (
+    SELECT customer_id,
+           ts,
+           sum(new_session) OVER (PARTITION BY customer_id ORDER BY ts) AS session_no
+    FROM flagged
+)
+SELECT customer_id,
+       session_no,
+       min(ts) AS started_at,
+       max(ts) AS ended_at,
+       count(*) AS events,
+       round(extract(epoch FROM max(ts) - min(ts))::numeric / 60, 2) AS minutes
+FROM sessions
+GROUP BY customer_id, session_no
+HAVING count(*) >= 3
+ORDER BY customer_id, session_no;
+@@@FILE challenge/expected.sql
+WITH ev AS (
+    SELECT customer_id, id, ts
+    FROM events
+    WHERE customer_id BETWEEN 1 AND 3
+),
+gapped AS (
+    SELECT customer_id,
+           ts,
+           ts - lag(ts) OVER (PARTITION BY customer_id ORDER BY ts) AS gap_from_prev
+    FROM ev
+),
+starts AS (
+    SELECT customer_id, ts
+    FROM gapped
+    WHERE gap_from_prev IS NULL
+       OR gap_from_prev > INTERVAL '12 hours'
+),
+assigned AS (
+    SELECT g.customer_id,
+           g.ts,
+           (SELECT count(*)
+              FROM starts s
+             WHERE s.customer_id = g.customer_id
+               AND s.ts <= g.ts) AS session_no
+    FROM gapped g
+)
+SELECT customer_id,
+       session_no,
+       min(ts) AS started_at,
+       max(ts) AS ended_at,
+       count(*) AS events,
+       round((extract(epoch FROM max(ts)) - extract(epoch FROM min(ts)))::numeric / 60, 2)
+           AS minutes
+FROM assigned
+GROUP BY customer_id, session_no
+HAVING count(*) >= 3
+ORDER BY customer_id, session_no;
+@@@FILE review1/prompt.md
+## Spaced review
+
+Edit `review1/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 61 people in
+`finance`. Hire dates span ten years, so there are long quiet stretches
+between hires.
+
+HR wants the three longest hiring droughts: for each consecutive pair of
+finance hires (in date order), how long the department went without hiring,
+keeping the three longest.
+
+Illustration:
+
+```
+ gap_start  | gap_end    | gap_days
+------------+------------+----------
+ 2016-04-11 | 2018-11-30 |      963
+ 2019-02-02 | 2020-07-15 |      529
+ 2015-03-02 | 2016-04-11 |      406
+```
+
+`gap_start` is the earlier hire's date and `gap_end` the later one, so
+`gap_days` is simply `gap_end - gap_start` — two `date` values subtract to
+an integer number of days, with no `extract` and no cast.
+
+Two people hired on the same day produce a gap of 0; those rows are
+uninteresting but harmless, and they will never reach the top three.
+
+Ties in `gap_days` are broken by the earlier `gap_start`, so the answer is
+exactly three rows.
+
+Columns, in this order: `gap_start` (a `date`), `gap_end` (a `date`),
+`gap_days` (an integer).
+
+**Ordered by `gap_days` descending, then `gap_start` ascending.** (3 rows.)
+
+```
+uv run dojo test v3a05_gaps_and_islands review1
+```
+@@@FILE review1/hints.md
+## Hint 1
+
+A gap is a property of two adjacent rows, so the first step is to put the
+next hire's date onto each row. The rest is subtraction and sorting.
+
+## Hint 2
+
+```sql
+lead(hired_on) OVER (ORDER BY hired_on, id) AS next_hired_on
+```
+
+The tie-break in the ordering matters when two people share a hire date —
+without it, which of them is "next" is undefined.
+
+## Hint 3
+
+The most recent hire has no successor, so `lead` gives NULL and the
+subtraction gives NULL. Those rows must not appear in the output. You can
+drop them with an explicit `IS NOT NULL` or rely on the ordering — but a
+`LIMIT` over a result containing NULLs sorted `DESC` will put them *first*,
+because `DESC` defaults to `NULLS FIRST`. That is the decision this exercise
+leaves you, and getting it wrong puts an empty row at the top of the report.
+@@@FILE review1/importantHints.md
+## Hint 1
+
+Predict the trap before you hit it. `ORDER BY gap_days DESC LIMIT 3` on a
+column containing a NULL: PostgreSQL's `DESC` puts NULLs first, so your top
+three would be one NULL row and two real ones. Either filter the NULL out or
+say `NULLS LAST`. Both are correct; only one of them is obvious to the next
+reader.
+
+## Hint 2
+
+A second way to get the same answer, worth writing as a cross-check: instead
+of `lead`, use a correlated subquery that finds the minimum `hired_on`
+strictly after this one. It cannot produce a row for the last hire either,
+but it fails differently — the subquery returns NULL rather than the window
+returning NULL — and comparing the two is a good way to confirm you
+understand what each is doing.
+
+## Hint 3
+
+Notice that this is exercise 1's technique on a different type. There, gaps
+were integers between customer ids and you reported the missing values.
+Here, gaps are days between hire dates and you report the span. The
+mechanism — put the neighbour on the row, subtract, filter — is identical,
+which is the point of a spaced review.
+@@@FILE review1/solution.sql
+-- v3a05_gaps_and_islands / review1 — the three longest finance hiring droughts.
+WITH fin AS (
+    SELECT hired_on,
+           lead(hired_on) OVER (ORDER BY hired_on, id) AS next_hired_on
+    FROM staff
+    WHERE department = 'finance'
+)
+SELECT hired_on                  AS gap_start,
+       next_hired_on             AS gap_end,
+       next_hired_on - hired_on  AS gap_days
+FROM fin
+WHERE next_hired_on IS NOT NULL
+ORDER BY gap_days DESC, gap_start
+LIMIT 3;
+@@@FILE review1/expected.sql
+WITH fin AS (
+    SELECT id, hired_on
+    FROM staff
+    WHERE department = 'finance'
+),
+paired AS (
+    SELECT f.hired_on,
+           (SELECT min(n.hired_on)
+              FROM fin n
+             WHERE (n.hired_on, n.id) > (f.hired_on, f.id)) AS next_hired_on
+    FROM fin f
+)
+SELECT hired_on                 AS gap_start,
+       next_hired_on            AS gap_end,
+       next_hired_on - hired_on AS gap_days
+FROM paired
+WHERE next_hired_on IS NOT NULL
+ORDER BY gap_days DESC, gap_start
+LIMIT 3;

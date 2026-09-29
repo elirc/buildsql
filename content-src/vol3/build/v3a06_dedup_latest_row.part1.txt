@@ -1,0 +1,704 @@
+@@@META
+{
+  "slug": "v3a06_dedup_latest_row",
+  "title": "V3·A6 — Deduplication and the latest row per key",
+  "summary": "\"The latest order per customer\" is under-specified until you say what happens to ties. This sector covers the four ways to write it — row_number, DISTINCT ON, NOT EXISTS, a correlated subquery — the ways they disagree, and how to find and describe duplicates before deleting anything."
+}
+@@@FILE briefing.md
+# V3·A6 — Deduplication and the latest row per key
+
+"Give me the latest order for each customer." It is the most common
+one-sentence requirement in analytics, and it contains a hole large enough
+to build a production incident in: what should happen if a customer has two
+orders with the same timestamp?
+
+There are four standard ways to write the query, they give three different
+answers to that question, and none of them is wrong. The skill is choosing
+deliberately and writing the choice down.
+
+This is the N = 1 case of sector v3a02_ranking_top_n's top-N per group.
+It gets its own sector because at N = 1 PostgreSQL offers a special-purpose
+tool the general case cannot use, and because "one row per key" is also how
+you find and remove duplicates — a job with much higher stakes than a
+report.
+
+## Concept
+
+**Ranking.** The portable answer, and the one that generalises:
+
+```sql
+SELECT customer_id, id, created_at, total
+FROM (
+    SELECT customer_id, id, created_at, total,
+           row_number() OVER (PARTITION BY customer_id
+                              ORDER BY created_at DESC, id DESC) AS rn
+    FROM orders
+) t
+WHERE rn = 1;
+```
+
+Exactly one row per customer, always. The tie-break — `id DESC` — is what
+makes "exactly one" mean "the same one every time".
+
+**`DISTINCT ON`.** PostgreSQL's compact spelling of the same thing:
+
+```sql
+SELECT DISTINCT ON (customer_id) customer_id, id, created_at, total
+FROM orders
+ORDER BY customer_id, created_at DESC, id DESC;
+```
+
+The rule to memorise: the `ORDER BY` must **start** with the `DISTINCT ON`
+expressions, in the same order. Everything after that decides which row of
+each group survives. Leave the ordering off and PostgreSQL picks an
+arbitrary row per group, silently — this is the one place where the language
+lets you write a non-deterministic query without any tie in your data.
+
+**`NOT EXISTS`.** No windows at all:
+
+```sql
+SELECT o.customer_id, o.id, o.created_at, o.total
+FROM orders o
+WHERE NOT EXISTS (
+    SELECT 1 FROM orders later
+    WHERE later.customer_id = o.customer_id
+      AND (later.created_at, later.id) > (o.created_at, o.id)
+);
+```
+
+"Keep the rows for which no later row exists." Written against
+`(created_at, id)` it returns exactly one row per customer, because the pair
+is unique. Written against `created_at` alone it returns **all** the tied
+rows — which is a genuine behavioural difference from `row_number`, and
+occasionally the answer you actually want.
+
+**A correlated subquery.** The oldest spelling, and still the right one when
+you need exactly one extra column from a lookup:
+
+```sql
+SELECT c.id,
+       (SELECT o.created_at FROM orders o
+         WHERE o.customer_id = c.id
+         ORDER BY o.created_at DESC, o.id DESC
+         LIMIT 1) AS last_order_at
+FROM customers c;
+```
+
+## The bug in the obvious approach
+
+Everyone writes this first:
+
+```sql
+SELECT o.*
+FROM orders o
+JOIN (SELECT customer_id, max(created_at) AS m FROM orders GROUP BY customer_id) x
+  ON x.customer_id = o.customer_id AND o.created_at = x.m;
+```
+
+It is correct exactly as long as no customer has two orders sharing their
+maximum timestamp. When one does, that customer contributes **two** rows,
+the result is one row longer than the number of customers, and every
+downstream count is quietly inflated. The failure rate scales with the
+coarseness of your sort key: on a timestamp it is rare, on a date it is
+common, on a "version number" column it is guaranteed.
+
+## Duplicates
+
+The same machinery finds duplicates. Two spellings, two different outputs:
+
+```sql
+-- the groups
+SELECT name, count(*) FROM customers GROUP BY name HAVING count(*) > 1;
+
+-- the rows
+SELECT id, name, cnt FROM (
+    SELECT id, name, count(*) OVER (PARTITION BY name) AS cnt FROM customers
+) t WHERE cnt > 1;
+```
+
+`GROUP BY` tells you which keys are duplicated; the window keeps the
+individual rows, which is what you need if you intend to do anything about
+them. Add a `row_number()` and you have a keeper flag: `rn = 1` survives,
+everything else is a candidate for deletion.
+
+Deleting is where care is owed. The safe shape names the survivors
+explicitly:
+
+```sql
+DELETE FROM customers c
+USING (
+    SELECT id FROM (
+        SELECT id, row_number() OVER (PARTITION BY name ORDER BY id) AS rn
+        FROM customers
+    ) t WHERE rn > 1
+) doomed
+WHERE c.id = doomed.id;
+```
+
+You will sometimes see `ctid` used instead — PostgreSQL's physical row
+locator — because it is the only handle available when a table has no unique
+column at all. It works, and it is a last resort: `ctid` changes when a row
+is updated or the table is vacuumed, so it must be computed and used inside
+one statement, never stored, never passed between sessions. If your table
+has a primary key, use it.
+
+Every exercise here is a `SELECT`, including the one about deletion: you
+will produce the set of rows a `DELETE` would remove, which is exactly what
+you should do before running one anyway.
+
+## Exercise 1 — the latest row, ranked
+
+Each customer's most recent order, with a tie-break that makes the answer
+reproducible.
+
+## Exercise 2 — the same thing with DISTINCT ON
+
+Each customer's *first* order, using PostgreSQL's compact form and its
+ordering rule.
+
+## Exercise 3 — no later row exists
+
+The same "latest per customer" question with an anti-join, and what the
+choice of comparison key does to ties.
+
+## Exercise 4 — where the naive join breaks
+
+Customers whose most recent *day* of ordering holds more than one order —
+exactly the rows that would duplicate under a `max()`-and-join-back.
+
+## Exercise 5 — finding duplicates
+
+Customers sharing a name, returned as rows rather than as groups.
+
+## Exercise 6 — first and last in one pass
+
+Every order of a handful of customers, carrying that customer's first and
+last order — and the frame that makes the second one correct.
+
+## Exercise 7 — what a DELETE would remove
+
+The non-keeper rows of each duplicate-name group, chosen by an explicit
+rule.
+
+## Exercise 8 — one row per key, plus an aggregate
+
+Each customer's latest order alongside their lifetime order count and
+spend: two grains in one result.
+
+## Challenge — latest review per product, with context
+
+Each product's most recent review, plus that product's average rating and
+review count.
+
+## Spaced review
+
+`review1/`: the single most expensive product in each category, chosen with
+`DISTINCT ON` and a stated tie-break.
+@@@FILE explanation.md
+# Reading - sql/v3a06_dedup_latest_row
+
+Four ways to say "one row per key", and the differences between them are all
+about ties.
+
+## Notes
+
+**The requirement is incomplete until ties are specified.** "The latest
+order per customer" does not say what to do when two orders share a
+timestamp. Every implementation answers it — `row_number` picks one
+arbitrarily unless you add a tie-break, `NOT EXISTS` on a non-unique key
+keeps them all, the `max()`-join keeps them all too. Decide, then write the
+decision into the query.
+
+**A tie-break makes the answer a function of the data.** `ORDER BY
+created_at DESC, id DESC` is total, so exactly one row wins and the same one
+wins every time. Without it, which row survives depends on the plan.
+
+**`DISTINCT ON` has one syntactic rule and one semantic trap.** The rule:
+`ORDER BY` must begin with the `DISTINCT ON` expressions. The trap: if you
+omit the rest of the ordering, PostgreSQL returns an arbitrary row per
+group — legal, deterministic-looking, and unreliable.
+
+**`NOT EXISTS` and `row_number` disagree on ties by design.** "No later row
+exists" keeps every row tied for latest; "row number 1" keeps one. Which is
+correct depends on whether the question is "the latest order" or "the
+orders that are latest".
+
+**`max()` plus a join back is the common bug.** It is an anti-join written
+as a semi-join, and it multiplies rows for any key whose maximum is shared.
+The symptom is a result one or two rows longer than the number of keys —
+easy to miss, and it corrupts every count downstream.
+
+**Finding duplicates: groups or rows.** `GROUP BY ... HAVING count(*) > 1`
+gives you the offending keys. `count(*) OVER (PARTITION BY key)` in a
+subquery gives you the offending *rows*, which is what you need to act.
+
+**`first_value` and `last_value` obey the frame; `min` and `max` do not
+need one.** Getting a group's first and last row in one pass needs `ROWS
+BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING`, or the last value is
+the current row.
+
+**`ctid` is a last resort.** It identifies a physical row version. It is the
+only handle on a table with no unique column, it is invalidated by updates
+and vacuum, and it must never leave the statement that computed it.
+
+**At N = 1, `DISTINCT ON` is usually the fastest.** One sort, one
+uniquification pass, no window node. At N > 1 it does not apply at all and
+you are back in sector v3a02_ranking_top_n.
+
+**Aggregate over the history, not over the survivors.** When a report needs
+both the latest row and a lifetime total, the total must be computed before
+the reduction to one row per key — either with an unordered window over the
+same partition, or in a separate `GROUP BY` that is joined back. Aggregating
+the already-reduced set gives every customer a lifetime order count of 1,
+and the number is wrong in a way that looks like a data problem.
+
+**Filter whole partitions early.** `WHERE customer_id BETWEEN 1 AND 20`
+belongs inside the level that computes the window. Removing entire
+partitions cannot change any surviving row's rank, it is the one class of
+predicate PostgreSQL will push through a window node on its own, and it
+turns a sort of half a million rows into a sort of two hundred.
+
+**Three different questions hide behind one sentence.** "The latest order"
+wants one row and needs a tie-break. "The orders that are latest" wants
+every tied row and is an anti-join on the timestamp alone. "The latest
+order date" wants no row at all — it is `max(created_at)` with a
+`GROUP BY`, and it is by far the cheapest. A surprising number of
+requirements dissolve into the third under one question.
+
+## ex1 — the latest row, ranked
+
+The portable shape. The tie-break in the window is doing more work than it
+looks like: it decides membership, not just display order.
+
+## ex2 — the same thing with DISTINCT ON
+
+Note that "first" instead of "latest" changes only the direction of the
+ordering. The rule about `ORDER BY` leading with the `DISTINCT ON`
+expressions is the part to internalise; PostgreSQL's error message when you
+break it is unusually clear.
+
+## ex3 — no later row exists
+
+Row-comparison syntax — `(a, b) > (c, d)` — is lexicographic and exactly
+matches a two-column `ORDER BY`. Using it here keeps the anti-join
+deterministic.
+
+## ex4 — where the naive join breaks
+
+This exercise produces the evidence rather than the bug: the customers for
+whom a date-grained `max()`-and-join would return two rows. Once you have
+seen how many there are, you will never write the join without thinking
+about it.
+
+## ex5 — finding duplicates
+
+`count(*) OVER (PARTITION BY name)` keeps the rows. The classic mistake is
+`GROUP BY name HAVING count(*) > 1`, which answers a different question —
+useful, but you cannot delete a group.
+
+## ex6 — first and last in one pass
+
+The frame trap again, in a new setting. `first_value` is right by accident;
+`last_value` is wrong by default.
+
+## ex7 — what a DELETE would remove
+
+The rule — keep the lowest id — has to be explicit, and the query returns
+the losers. Running this before a `DELETE` is not caution, it is the
+procedure.
+
+## ex8 — one row per key, plus an aggregate
+
+Two grains: one row per customer from a ranking, and per-customer totals
+from an aggregate. Either compute both in one pass with windows, or join two
+CTEs; both are defensible.
+
+## challenge — latest review per product, with context
+
+The same combination on a much larger table, which is where the choice
+between shapes starts to have a cost.
+
+## review1 — the dearest product per category
+
+`DISTINCT ON` with a stated tie-break, on six groups.
+
+## Further reading
+
+- [SELECT — DISTINCT ON](https://www.postgresql.org/docs/16/sql-select.html#SQL-DISTINCT) — the syntax, the `ORDER BY` rule, and the explicit warning about unpredictable results without one.
+- [Window Functions](https://www.postgresql.org/docs/16/functions-window.html) — `row_number`, and the frame sensitivity of `first_value`/`last_value`.
+- [Subquery Expressions](https://www.postgresql.org/docs/16/functions-subquery.html) — `EXISTS`, `NOT EXISTS`, and row constructors compared with `>`.
+- [DELETE](https://www.postgresql.org/docs/16/sql-delete.html) — the `USING` clause, which is how a deduplicating delete names its victims.
+- [System Columns](https://www.postgresql.org/docs/16/ddl-system-columns.html) — what `ctid` actually is, and why it is not stable.
+@@@FILE fullReadme.md
+# V3·A6 — Deduplication and the latest row per key
+
+One row per key, chosen on purpose.
+
+## Concept
+
+### Four spellings
+
+```sql
+-- 1. row_number: exactly one row per key, tie broken by the ORDER BY
+SELECT customer_id, id, created_at FROM (
+    SELECT customer_id, id, created_at,
+           row_number() OVER (PARTITION BY customer_id
+                              ORDER BY created_at DESC, id DESC) AS rn
+    FROM orders
+) t WHERE rn = 1;
+
+-- 2. DISTINCT ON: the same, in PostgreSQL shorthand
+SELECT DISTINCT ON (customer_id) customer_id, id, created_at
+FROM orders
+ORDER BY customer_id, created_at DESC, id DESC;
+
+-- 3. NOT EXISTS: "no later row" — keeps all ties if the key is not unique
+SELECT o.customer_id, o.id, o.created_at
+FROM orders o
+WHERE NOT EXISTS (SELECT 1 FROM orders l
+                   WHERE l.customer_id = o.customer_id
+                     AND (l.created_at, l.id) > (o.created_at, o.id));
+
+-- 4. correlated scalar subquery: one column, no join tree changes
+SELECT c.id,
+       (SELECT max(o.created_at) FROM orders o WHERE o.customer_id = c.id) AS last_at
+FROM customers c;
+```
+
+### The `DISTINCT ON` rule
+
+`ORDER BY` must start with the `DISTINCT ON` expressions:
+
+```sql
+SELECT DISTINCT ON (category) category, id, price
+FROM products
+ORDER BY category, price DESC, id;    -- legal
+ORDER BY price DESC;                  -- ERROR: SELECT DISTINCT ON expressions
+                                      -- must match initial ORDER BY expressions
+```
+
+And without the trailing ordering, the surviving row is arbitrary.
+
+### Duplicates: groups versus rows
+
+```sql
+-- which names are duplicated
+SELECT name, count(*) AS n FROM customers GROUP BY name HAVING count(*) > 1;
+
+-- which rows are duplicates
+SELECT id, name, n FROM (
+    SELECT id, name, count(*) OVER (PARTITION BY name) AS n FROM customers
+) t WHERE n > 1 ORDER BY name, id;
+
+-- which rows to delete, keeping the lowest id
+SELECT id, name FROM (
+    SELECT id, name,
+           row_number() OVER (PARTITION BY name ORDER BY id) AS rn
+    FROM customers
+) t WHERE rn > 1;
+```
+
+### Deleting, safely
+
+```sql
+DELETE FROM customers c
+USING (SELECT id FROM (
+           SELECT id, row_number() OVER (PARTITION BY name ORDER BY id) AS rn
+           FROM customers) t
+        WHERE rn > 1) doomed
+WHERE c.id = doomed.id;
+```
+
+Run the `SELECT` version first, read it, then convert it. If the table has
+no unique column, `ctid` is the fallback — a physical row locator that is
+invalidated by updates and vacuum, so it must be computed and consumed
+inside a single statement.
+
+## Worked example — the max-and-join bug, in the open
+
+```sql
+-- the tempting version, at day grain
+WITH last_day AS (
+    SELECT customer_id, max(created_at::date) AS d
+    FROM orders WHERE customer_id <= 50 GROUP BY customer_id
+)
+SELECT o.customer_id, o.id, o.created_at
+FROM orders o
+JOIN last_day l ON l.customer_id = o.customer_id
+               AND o.created_at::date = l.d;
+```
+
+If a customer placed two orders on their most recent day, both rows come
+back. The query looks like "one row per customer" and is not. The general
+statement of the bug: joining back to an aggregate reproduces *every* row
+that attains the aggregate, and `max()` does not promise uniqueness.
+
+Three repairs, in order of preference: rank with a total ordering and take
+`rn = 1`; use `DISTINCT ON` with the same total ordering; or keep the join
+and accept the ties deliberately, documenting that the result can exceed one
+row per key.
+
+## Worked example — first and last order in one pass
+
+```sql
+SELECT customer_id, id, created_at,
+       first_value(id) OVER w AS first_order_id,
+       last_value(id)  OVER w AS last_order_id
+FROM orders
+WHERE customer_id BETWEEN 1 AND 5
+WINDOW w AS (PARTITION BY customer_id ORDER BY created_at, id
+             ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
+ORDER BY customer_id, created_at, id;
+```
+
+Without the frame, `last_order_id` is the current row's own id on every row.
+`first_value` is right either way, which is what makes the bug survive
+review.
+
+## Worked example — the latest row plus a lifetime total
+
+The report that catches people: a customer card showing the most recent
+order *and* how much the customer has ever spent. Two grains, one row.
+
+```sql
+WITH annotated AS (
+    SELECT customer_id, id, created_at, total,
+           row_number() OVER (PARTITION BY customer_id
+                              ORDER BY created_at DESC, id DESC) AS rn,
+           count(*)   OVER (PARTITION BY customer_id) AS lifetime_orders,
+           sum(total) OVER (PARTITION BY customer_id) AS lifetime_spend
+    FROM orders
+    WHERE customer_id BETWEEN 1 AND 20
+)
+SELECT customer_id, id AS last_order_id, created_at AS last_order_at,
+       total AS last_order_total, lifetime_orders, lifetime_spend
+FROM annotated
+WHERE rn = 1
+ORDER BY customer_id;
+```
+
+The two unordered windows summarise the whole partition and are already
+correct on the row that survives. Contrast with the version that reduces
+first:
+
+```sql
+WITH latest AS (SELECT ... WHERE rn = 1)
+SELECT customer_id, count(*), sum(total) FROM latest GROUP BY customer_id;
+```
+
+Every customer now has a lifetime order count of exactly 1, because the set
+being aggregated has already been cut down to one row each. The numbers look
+like a data problem and are a sequencing problem.
+
+The join-back alternative is equally correct and says the two grains out
+loud: `DISTINCT ON` for the row, `GROUP BY` for the totals, joined on the
+key. It reads the table twice. Choose on readability at small scale and on
+the plan at large scale.
+
+## Common mistakes
+
+- **No tie-break.** `row_number` and `DISTINCT ON` both pick arbitrarily.
+- **`DISTINCT ON` with no trailing `ORDER BY`.** Arbitrary row, no warning.
+- **`DISTINCT ON` with a mismatched `ORDER BY`.** Syntax error — this one at
+  least tells you.
+- **`max()` joined back.** Row multiplication on ties.
+- **`GROUP BY ... HAVING count(*) > 1` when you needed rows.** You cannot
+  delete a group.
+- **`count(*) OVER (PARTITION BY key)` filtered in `WHERE`.** Windows run
+  after `WHERE`; add a level.
+- **`last_value` with the default frame.** Returns the current row.
+- **Storing a `ctid`.** It is a physical address, not an identity.
+- **Deduplicating without looking first.** The `SELECT` that lists the
+  victims takes ten seconds to write and is the entire safety procedure.
+
+## The interview answer
+
+> *How do you get the most recent row per customer?*
+
+`row_number() OVER (PARTITION BY customer_id ORDER BY created_at DESC, id
+DESC)` in a subquery, filtered to `= 1` outside it — the tie-break column
+matters, because without it the surviving row is whichever one the sort
+happened to emit first. In PostgreSQL specifically I would usually write
+`DISTINCT ON (customer_id)` with the same ordering: it is shorter and
+typically a bit faster, since it is one sort and a uniquification pass
+rather than a window node. If the requirement is "all rows tied for most
+recent" rather than "the most recent row", I would use `NOT EXISTS` with a
+comparison on the timestamp alone, which keeps ties by construction. What I
+would avoid is `max(created_at)` joined back to the table, because it
+returns two rows for any customer whose maximum is shared, and that inflates
+every count downstream.
+
+## Check yourself
+
+1. Why is "the latest order per customer" under-specified?
+2. Write it with `row_number`, and say what the tie-break decides.
+3. Write it with `DISTINCT ON`, and state the rule about `ORDER BY`.
+4. What does `DISTINCT ON` do if you omit the trailing ordering?
+5. How do `NOT EXISTS` and `row_number` differ on ties?
+6. What is wrong with `max()` plus a join back, and when does it bite?
+7. What is the symptom of that bug in the output?
+8. Give the query that lists duplicate *rows*, not duplicate keys.
+9. Add a keeper flag to it.
+10. Write the `DELETE` that removes the non-keepers.
+11. When would you use `ctid`, and what are the two rules for it?
+12. Why does `last_value` need a frame when `first_value` seems not to?
+13. When is `DISTINCT ON` not an option?
+14. You need the latest order *and* the customer's lifetime spend. What are
+    the two shapes, and how would you choose?
+@@@FILE fullReading.md
+# Reading - sql/v3a06_dedup_latest_row
+
+`DISTINCT ON` is a PostgreSQL extension, not standard SQL, and it is one of
+the few places where the extension is clearly better than the standard
+answer. Understanding why requires looking at what the executor does with
+each of the four shapes.
+
+## The plans
+
+**`DISTINCT ON`** compiles to a `Unique` node over a `Sort`:
+
+```
+ Unique
+   ->  Sort
+         Sort Key: customer_id, created_at DESC, id DESC
+         ->  Seq Scan on orders
+```
+
+The sort clusters rows by key and orders within each cluster; `Unique` walks
+the sorted stream and emits the first row of each cluster, discarding the
+rest. One sort, one pass, no buffering beyond what the sort needs. When an
+index supplies the ordering, the sort disappears entirely and the query
+becomes an index scan that skips forward — close to optimal.
+
+**`row_number() = 1`** compiles to a filter over a `WindowAgg` over the same
+sort:
+
+```
+ Subquery Scan
+   Filter: (t.rn = 1)
+   ->  WindowAgg
+         ->  Sort
+               Sort Key: customer_id, created_at DESC, id DESC
+```
+
+The same sort, plus a window node that numbers every row, plus a filter that
+throws away all but one per group. It computes numbers for rows it is about
+to discard. In practice the difference from `DISTINCT ON` is modest — tens
+of percent, not orders of magnitude — but it is consistently in `DISTINCT
+ON`'s favour, and it grows with the average group size.
+
+**`NOT EXISTS`** becomes an anti-join, usually hashed:
+
+```
+ Hash Anti Join
+   Hash Cond: (o.customer_id = l.customer_id)
+   Join Filter: ((l.created_at, l.id) > (o.created_at, o.id))
+   ->  Seq Scan on orders o
+   ->  Hash
+         ->  Seq Scan on orders l
+```
+
+Two scans of the table and a hash build. On a large table this is the most
+expensive of the four, and it is the only one that gets *worse* with group
+size, because the join filter is evaluated per candidate pair. Its virtue is
+semantic rather than mechanical: it expresses "no later row" directly, and
+it keeps ties when the comparison key is not unique.
+
+**The correlated subquery** becomes a nested loop with a `SubPlan`, one
+execution per outer row — unless PostgreSQL can memoise it, which it can
+when the correlation values repeat. With a supporting index it is often the
+fastest of all for the "one extra column" case, because each execution is a
+single index descent. Without one, it is the slowest by a wide margin. This
+dataset has no such index, which is worth remembering when you time things
+here.
+
+## Why `DISTINCT ON` exists
+
+The standard's answer to "one row per group" is a window function, and
+window functions arrived in SQL:2003. `DISTINCT ON` predates that in
+PostgreSQL by years — it was already present in the mid-1990s, inherited
+from Postgres's academic lineage. It survived standardisation because it is
+strictly shorter for the commonest case and because the planner can execute
+it with the cheapest possible plan.
+
+The cost of the extension is portability and a sharp edge. The sharp edge is
+that `DISTINCT ON` without a full `ORDER BY` is legal. The documentation
+says plainly that the result is unpredictable, and yet a query like
+
+```sql
+SELECT DISTINCT ON (customer_id) * FROM orders ORDER BY customer_id;
+```
+
+runs, returns one row per customer, and is wrong in a way that no amount of
+testing will reveal — it will return the same arbitrary row for months and
+then a different one after an index is added. Treat a `DISTINCT ON` without
+a discriminating `ORDER BY` as a bug on sight.
+
+## Ties, and why they are a specification problem
+
+Consider three ways the tie question can be answered and what each implies
+about the business:
+
+"Give me the latest order" — exactly one row, so any tie must be broken
+somehow. The tie-break should be meaningful if possible (the higher id is
+the later insert) and arbitrary-but-stable otherwise. This is the right
+answer when the consumer expects one row per customer and will break if it
+gets two.
+
+"Give me the orders that are latest" — all tied rows. `NOT EXISTS` on the
+timestamp alone. This is right when the tie is real information — two
+readings at the same instant, two versions committed together — and hiding
+one of them would be data loss.
+
+"Give me the latest timestamp" — an aggregate, one row per customer, no row
+identity at all. `max(created_at)` with a `GROUP BY`. This is right when
+nobody needs to know *which* order it was, and it is the cheapest of the
+three by a distance. A surprising number of "latest row per key"
+requirements dissolve into this one under questioning.
+
+The join-back bug is what happens when someone starts from the third
+formulation and then needs the row after all.
+
+## Deleting duplicates
+
+The stakes change completely once a `DELETE` is involved, and the procedure
+matters more than the SQL.
+
+Write the `SELECT` first. Look at its row count. Compare it against the
+count of duplicate groups: if you have 400 duplicate names covering 900
+rows, the delete should remove exactly 500. If your `SELECT` returns 900,
+your keeper rule is missing and you are about to delete every copy including
+the ones you meant to keep — a mistake that has emptied real tables.
+
+Run it in a transaction. `BEGIN`, `DELETE`, check `SELECT count(*)`, then
+`COMMIT` or `ROLLBACK`. PostgreSQL's DDL and DML are both transactional,
+which makes this trivially cheap insurance.
+
+Prefer the primary key. `DELETE ... USING (SELECT id ...)` names the victims
+by identity. The `ctid` variant exists for tables with no unique column at
+all — genuinely duplicated rows, where nothing distinguishes them — and
+comes with two hard rules: compute and use it within one statement, and
+never store it. A `ctid` is a `(page, item)` address; an `UPDATE` moves the
+row to a new one, and `VACUUM FULL` rewrites the whole table.
+
+Finally, consider whether the fix belongs in a constraint rather than a
+script. If duplicate names are wrong, `CREATE UNIQUE INDEX` after the
+cleanup stops the next one. A deduplication job that runs nightly is usually
+a missing constraint wearing a cron entry.
+
+## When not to reach for this sector
+
+**When you want an aggregate.** "The date of each customer's last order" is
+`max(created_at) GROUP BY customer_id`. No ranking, no window, no ties to
+worry about.
+
+**When N is greater than one.** "The three most recent orders per customer"
+cannot use `DISTINCT ON`. That is sector v3a02_ranking_top_n.
+
+**When the duplicates should not exist.** If a unique constraint is missing,
+adding it is the fix; a dedup query is the clean-up you do once on the way.
+
+**When the "latest" is expensive and needed constantly.** A materialised
+view, a `latest_order_id` column maintained by a trigger, or a denormalised
+summary table all beat recomputing a global ranking on every dashboard load.
+The query in this sector is how you populate them, not how you serve them.

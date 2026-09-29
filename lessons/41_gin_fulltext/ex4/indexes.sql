@@ -1,1 +1,0 @@
--- 41_gin_fulltext/ex4: your CREATE INDEX here (see README.md)

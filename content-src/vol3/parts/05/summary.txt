@@ -1,0 +1,1 @@
+JSON is where your types meet somebody else's system, and the wire format outlives every refactor. This sector covers options as a cached contract, converters written against Utf8JsonReader, polymorphism and discriminators, source generation for trimming and startup, tolerant reading with strict writing, streaming, and migrating a document between versions.

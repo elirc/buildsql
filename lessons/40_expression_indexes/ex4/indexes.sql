@@ -1,1 +1,0 @@
--- 40_expression_indexes/ex4: your CREATE INDEX here (see README.md)

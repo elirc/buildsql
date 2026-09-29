@@ -1,3 +1,0 @@
-SELECT id
-FROM orders
-WHERE total BETWEEN 1990 AND 2000;

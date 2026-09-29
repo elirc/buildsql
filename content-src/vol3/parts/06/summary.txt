@@ -1,0 +1,1 @@
+A benchmark is an experiment, and most benchmarks are broken experiments. This sector builds the analysis half: benchmark shapes that measure something, baselines and ratios, distributions and outliers, whether a difference is real, ops-per-second conversions, the memory column, and the traps that make a number meaningless.

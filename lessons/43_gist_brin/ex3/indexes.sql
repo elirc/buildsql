@@ -1,1 +1,0 @@
--- 43_gist_brin/ex3: your CREATE INDEX here (see README.md)

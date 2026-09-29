@@ -1,0 +1,828 @@
+@@@FILE ex5/prompt.md
+## Exercise 5 — frames that look forward
+
+Edit `ex5/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`. Restrict to October 2023 with
+`created_at >= '2023-10-01' AND created_at < '2023-11-01'`, and roll up to
+one row per day first — October 2023 has orders on every one of its 31 days.
+
+Planning wants two forward-ish views of the month on the same sheet: what
+the next three days brought in, and a three-day centred smoothing of the
+current day.
+
+Illustration on five days:
+
+```
+    day     | revenue  | next3_revenue | centered_avg3
+------------+----------+---------------+--------------
+ 2023-10-01 | 100.00   |        600.00 |        150.00
+ 2023-10-02 | 200.00   |        900.00 |        200.00
+ 2023-10-03 | 300.00   |       1100.00 |        300.00
+ 2023-10-04 | 400.00   |        900.00 |        400.00
+ 2023-10-05 | 500.00   |               |        450.00
+```
+
+Two things to read off it. `next3_revenue` on 2023-10-01 is days 2, 3 and 4
+— it does **not** include the current day. On the final row the frame is
+empty, so the sum is NULL, not zero; there is no next week to be worth
+nothing. `centered_avg3` on the first and last rows averages two days,
+because that is all the frame contains.
+
+Columns, in this order: `day` (a `date`), `revenue` (the day's total),
+`next3_revenue` (the sum of the following three days' revenue, NULL where no
+following day exists), `centered_avg3` (the mean of the previous day, this
+day and the next day, rounded to 2 decimals).
+
+**Ordered by `day` ascending.** (31 rows.)
+
+```
+uv run dojo test v3a01_window_frames ex5
+```
+@@@FILE ex5/hints.md
+## Hint 1
+
+Nothing says a frame has to contain the current row, or anything before it.
+Both bounds can sit in the future. Describe each column in the form "from
+_____ to _____" and the frame clauses write themselves.
+
+## Hint 2
+
+A related shape — each row beside the row two positions ahead of it and the
+one behind:
+
+```sql
+SELECT day, revenue,
+       min(revenue) OVER (ORDER BY day ROWS BETWEEN CURRENT ROW AND 2 FOLLOWING) AS dip
+FROM daily;
+```
+
+`CURRENT ROW` is a legal *starting* bound as well as an ending one.
+
+## Hint 3
+
+Build the daily rollup in a CTE first: `date_trunc('day', created_at)::date`
+and `sum(total)`, with the October filter in the `WHERE` of that CTE so the
+window only ever sees 31 rows. Then two windows over it. The decision left
+to you is `ROWS` versus `RANGE`: with one row per day and no gaps they agree
+— pick the one whose meaning you can defend.
+@@@FILE ex5/importantHints.md
+## Hint 1
+
+Start with the edges, because that is where forward frames are interesting.
+For the last day of October, which rows are in `ROWS BETWEEN 1 FOLLOWING AND
+3 FOLLOWING`? None. Now decide what `sum` of no rows should be, and check
+your instinct against the illustration: it is NULL. If you find yourself
+reaching for `coalesce(..., 0)`, stop — the prompt wants the NULL.
+
+## Hint 2
+
+The other trap is off-by-one. These are three different frames:
+
+```sql
+ROWS BETWEEN CURRENT ROW AND 3 FOLLOWING   -- four days, including today
+ROWS BETWEEN 1 FOLLOWING AND 3 FOLLOWING   -- three days, excluding today
+ROWS BETWEEN 1 FOLLOWING AND 4 FOLLOWING   -- four days, excluding today
+```
+
+Only one of them is "the next three days". Count the rows in each on paper
+before choosing.
+
+## Hint 3
+
+For the centred column, the frame is symmetric: one back, one forward. The
+`avg` of a `numeric` column is `numeric`, so `round(..., 2)` applies
+directly with no cast. Wrap the whole window call in `round`, not the other
+way round — `avg(round(revenue, 2))` is a different and wronger query.
+@@@FILE ex5/solution.sql
+-- v3a01_window_frames / ex5 — a forward frame and a centred frame.
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1
+)
+SELECT day,
+       revenue,
+       sum(revenue) OVER (ORDER BY day
+                          ROWS BETWEEN 1 FOLLOWING
+                                   AND 3 FOLLOWING)      AS next3_revenue,
+       round(avg(revenue) OVER (ORDER BY day
+                                ROWS BETWEEN 1 PRECEDING
+                                         AND 1 FOLLOWING), 2) AS centered_avg3
+FROM daily
+ORDER BY day;
+@@@FILE ex5/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1
+)
+SELECT d.day,
+       d.revenue,
+       (SELECT sum(n.revenue)
+          FROM daily n
+         WHERE n.day > d.day
+           AND n.day <= d.day + 3)              AS next3_revenue,
+       (SELECT round(avg(c.revenue), 2)
+          FROM daily c
+         WHERE c.day BETWEEN d.day - 1 AND d.day + 1) AS centered_avg3
+FROM daily d
+ORDER BY d.day;
+@@@FILE ex6/prompt.md
+## Exercise 6 — RANGE with an interval
+
+Edit `ex6/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 61 people in
+`finance`. Their hire dates are spread over ten years, so the series is
+*sparse*: most days have no hire at all, and consecutive rows can be months
+apart.
+
+HR wants to see hiring bursts. Two columns, deliberately measuring different
+things:
+
+- `hired_in_last_60_days` — how many finance staff, including this one, were
+  hired in the window `[hired_on - 60 days, hired_on]`. That is calendar
+  time, so it needs a `RANGE` frame with an `interval` offset, and therefore
+  a window ordered by `hired_on` and nothing else.
+- `last_4_hires` — how many rows are in the frame "this row and the three
+  before it". That is positional, so it needs `ROWS`, and — because `ROWS`
+  over a non-unique key is undefined — a window ordered by `hired_on, id`.
+
+Illustration on five hires:
+
+```
+ id | hired_on   | hired_in_last_60_days | last_4_hires
+----+------------+-----------------------+-------------
+  7 | 2015-03-02 |                     1 |            1
+ 12 | 2015-04-11 |                     2 |            2
+  4 | 2015-04-28 |                     3 |            3
+ 31 | 2018-11-30 |                     1 |            4
+ 22 | 2018-12-06 |                     2 |            4
+```
+
+Row 4 is the point of the exercise. Positionally it has three predecessors,
+so `last_4_hires` is 4. In calendar terms it is three and a half years after
+row 3, so `hired_in_last_60_days` is 1 — itself. Rows are not time.
+
+Columns, in this order: `id`, `name`, `hired_on`,
+`hired_in_last_60_days`, `last_4_hires`.
+
+**Ordered by `hired_on` ascending, then `id` ascending.** (61 rows.)
+
+```
+uv run dojo test v3a01_window_frames ex6
+```
+@@@FILE ex6/hints.md
+## Hint 1
+
+One of these columns counts things that are near in the calendar; the other
+counts things that are near in the list. SQL has a separate frame mode for
+each, and they are not interchangeable.
+
+## Hint 2
+
+`RANGE` offsets live in value space. Over a numeric column that looks like
+this:
+
+```sql
+count(*) OVER (ORDER BY salary RANGE BETWEEN 5000 PRECEDING AND CURRENT ROW)
+```
+
+— "how many people earn between my salary minus 5000 and my salary". Over a
+date column the offset has to be an `interval` instead of a number, and the
+shape is otherwise identical.
+
+## Hint 3
+
+A `RANGE` frame with an offset requires **exactly one** expression in the
+window's `ORDER BY`; two is an error, because "value minus 60 days" has no
+meaning for a pair. That constraint is why the two columns in this exercise
+must use two different windows rather than one shared one. Whether you name
+them with a `WINDOW` clause or write both out inline is your call.
+@@@FILE ex6/importantHints.md
+## Hint 1
+
+Diagnose this before you write anything. Someone reports that their
+"hires in the last 60 days" column is wrong, and shows you:
+
+```sql
+count(*) OVER (ORDER BY hired_on ROWS BETWEEN 60 PRECEDING AND CURRENT ROW)
+```
+
+They read `60 PRECEDING` as "sixty days". It is sixty *rows* — in a table of
+61 finance staff, that is very nearly the whole department, and the column
+they get is a running count. Name the one keyword that has to change, and
+what has to change alongside it.
+
+## Hint 2
+
+The keyword is `ROWS` becoming `RANGE`, and the thing that has to change
+alongside it is the offset: `60 PRECEDING` becomes `INTERVAL '60 days'
+PRECEDING`, because in `RANGE` mode the offset is subtracted from the
+ordering column's value and `hired_on` is a date.
+
+## Hint 3
+
+The second column is the one you already know how to write, with one
+subtlety: it must be deterministic. `ROWS BETWEEN 3 PRECEDING AND CURRENT
+ROW` over `ORDER BY hired_on` alone would count four rows in an order
+PostgreSQL never promised, whenever two people share a hire date. Add the
+tie-break. Note that both columns use `count(*)`, which returns `0` over an
+empty frame — but neither frame here can be empty, because both include the
+current row.
+@@@FILE ex6/solution.sql
+-- v3a01_window_frames / ex6 — calendar-time frame vs positional frame.
+SELECT id,
+       name,
+       hired_on,
+       count(*) OVER (ORDER BY hired_on
+                      RANGE BETWEEN INTERVAL '60 days' PRECEDING
+                                AND CURRENT ROW)  AS hired_in_last_60_days,
+       count(*) OVER (ORDER BY hired_on, id
+                      ROWS BETWEEN 3 PRECEDING
+                               AND CURRENT ROW)   AS last_4_hires
+FROM staff
+WHERE department = 'finance'
+ORDER BY hired_on, id;
+@@@FILE ex6/expected.sql
+WITH fin AS (
+    SELECT id, name, hired_on,
+           row_number() OVER (ORDER BY hired_on, id) AS rn
+    FROM staff
+    WHERE department = 'finance'
+)
+SELECT f.id,
+       f.name,
+       f.hired_on,
+       (SELECT count(*)
+          FROM fin a
+         WHERE a.hired_on <= f.hired_on
+           AND a.hired_on >= f.hired_on - INTERVAL '60 days') AS hired_in_last_60_days,
+       (SELECT count(*)
+          FROM fin b
+         WHERE b.rn BETWEEN f.rn - 3 AND f.rn)                AS last_4_hires
+FROM fin f
+ORDER BY f.hired_on, f.id;
+@@@FILE ex7/prompt.md
+## Exercise 7 — GROUPS and EXCLUDE
+
+Edit `ex7/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to `finance` (61 rows).
+
+Compensation is reviewing salary *bands*. Band each person by rounding their
+salary to the nearest ten thousand — `round(salary, -4)`, a negative scale
+rounding to the left of the decimal point — then, for each person, report
+how many colleagues sit in their band and the bands immediately either side
+of it, and how many sit in those neighbouring bands alone.
+
+This is what `GROUPS` mode is for. `ROWS BETWEEN 1 PRECEDING AND 1
+FOLLOWING` would give you three arbitrary rows; `GROUPS BETWEEN 1 PRECEDING
+AND 1 FOLLOWING` gives you three peer groups, however many rows each one
+holds.
+
+Illustration with three bands holding 2, 3 and 1 people:
+
+```
+ id | salary   | band  | band_and_neighbours | neighbours_only
+----+----------+-------+---------------------+----------------
+  3 | 51000.00 | 50000 |                   5 |               3
+  8 | 48000.00 | 50000 |                   5 |               3
+  1 | 62000.00 | 60000 |                   6 |               3
+  5 | 57000.00 | 60000 |                   6 |               3
+  9 | 61000.00 | 60000 |                   6 |               3
+  2 | 72000.00 | 70000 |                   4 |               3
+```
+
+The people in band 60000 see all six rows (2 + 3 + 1). The people in band
+50000 see five, because there is no band below them. `neighbours_only` is
+the same frame with the person's own band removed — `EXCLUDE GROUP`, not
+`EXCLUDE TIES`, which would keep the person and drop only their
+band-mates.
+
+Columns, in this order: `id`, `name`, `salary`, `band` (`round(salary, -4)`),
+`band_and_neighbours`, `neighbours_only`.
+
+**Ordered by `band` ascending, then `id` ascending.** (61 rows.)
+
+```
+uv run dojo test v3a01_window_frames ex7
+```
+@@@FILE ex7/hints.md
+## Hint 1
+
+Your window's ordering key is not the salary — it is the band. That is what
+manufactures the ties, and ties are what `GROUPS` mode counts. Compute the
+band once and order by that expression.
+
+## Hint 2
+
+`GROUPS` reads exactly like `ROWS`, with a different unit:
+
+```sql
+count(*) OVER (ORDER BY rating GROUPS BETWEEN 1 PRECEDING AND CURRENT ROW)
+```
+
+— "everyone at my rating, plus everyone at the next rating down".
+
+## Hint 3
+
+Two windows here differ only by a trailing `EXCLUDE GROUP`. You cannot get
+the second by extending the first with `OVER (w EXCLUDE GROUP)` — a named
+window that already carries a frame clause cannot be extended — so either
+write both out in full or declare two names in the `WINDOW` clause. The
+final `ORDER BY` may refer to your output alias `band` directly.
+@@@FILE ex7/importantHints.md
+## Hint 1
+
+Approach it from the failure. Write the query with `ROWS BETWEEN 1 PRECEDING
+AND 1 FOLLOWING` and look at two people in the same band: they get different
+answers, and both answers are three. Neither is the number anybody asked
+for. What went wrong is a units error — the frame counted rows when the
+question was about bands.
+
+## Hint 2
+
+Three exclusion clauses, three different meanings, on a row whose band holds
+five people and whose frame holds nine:
+
+```
+EXCLUDE NO OTHERS   -> 9   (the default)
+EXCLUDE CURRENT ROW -> 8   (drops me)
+EXCLUDE TIES        -> 5   (drops my band-mates, keeps me)
+EXCLUDE GROUP       -> 4   (drops me and my band-mates)
+```
+
+Only one of them answers "how many people are in the neighbouring bands".
+
+## Hint 3
+
+`count(*)` over an empty frame is `0`, not NULL — which matters here,
+because a band with no neighbours on either side genuinely has zero
+neighbours, and you should get `0` without writing a `coalesce`. If your
+result has NULLs in `neighbours_only`, you used an aggregate other than
+`count`.
+@@@FILE ex7/solution.sql
+-- v3a01_window_frames / ex7 — GROUPS mode over salary bands, with EXCLUDE.
+SELECT id,
+       name,
+       salary,
+       round(salary, -4)      AS band,
+       count(*) OVER w        AS band_and_neighbours,
+       count(*) OVER w_others AS neighbours_only
+FROM staff
+WHERE department = 'finance'
+WINDOW w AS (ORDER BY round(salary, -4)
+             GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING),
+       w_others AS (ORDER BY round(salary, -4)
+                    GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING
+                    EXCLUDE GROUP)
+ORDER BY band, id;
+@@@FILE ex7/expected.sql
+WITH fin AS (
+    SELECT id, name, salary, round(salary, -4) AS band
+    FROM staff
+    WHERE department = 'finance'
+),
+bands AS (
+    SELECT band,
+           count(*)                          AS n,
+           dense_rank() OVER (ORDER BY band)  AS r
+    FROM fin
+    GROUP BY band
+)
+SELECT f.id,
+       f.name,
+       f.salary,
+       f.band,
+       (SELECT coalesce(sum(x.n), 0)::bigint
+          FROM bands x
+         WHERE x.r BETWEEN b.r - 1 AND b.r + 1)      AS band_and_neighbours,
+       (SELECT coalesce(sum(x.n), 0)::bigint
+          FROM bands x
+         WHERE x.r BETWEEN b.r - 1 AND b.r + 1
+           AND x.r <> b.r)                           AS neighbours_only
+FROM fin f
+JOIN bands b ON b.band = f.band
+ORDER BY f.band, f.id;
+@@@FILE ex8/prompt.md
+## Exercise 8 — a named window and the last_value trap
+
+Edit `ex8/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`, October 2023 only
+(`created_at >= '2023-10-01' AND created_at < '2023-11-01'`), rolled up to
+one row per day.
+
+The month-end pack wants every daily row to carry three facts about the
+whole month: what the first day brought in, what the last day brought in,
+and what share of the month this day was. All three come from one window,
+and that window must be able to see the entire partition — including rows
+that come *after* the current one.
+
+Illustration on four days:
+
+```
+    day     | revenue | first_day_revenue | last_day_revenue | pct_of_month
+------------+---------+-------------------+------------------+-------------
+ 2023-10-01 |  100.00 |            100.00 |           400.00 |        10.00
+ 2023-10-02 |  200.00 |            100.00 |           400.00 |        20.00
+ 2023-10-03 |  300.00 |            100.00 |           400.00 |        30.00
+ 2023-10-04 |  400.00 |            100.00 |           400.00 |        40.00
+```
+
+`last_day_revenue` is 400.00 on **every** row. If yours equals `revenue` on
+every row, you have met the most famous bug in window functions: the default
+frame ends at the current row, so the last value in it is the current row.
+`first_value` hides the problem by being accidentally correct.
+
+Declare the window once in a `WINDOW` clause and use it three times.
+
+Columns, in this order: `day` (a `date`), `revenue`, `first_day_revenue`,
+`last_day_revenue`, `pct_of_month` (100 × this day's revenue ÷ the month's
+revenue, rounded to 2 decimals).
+
+**Ordered by `day` ascending.** (31 rows.)
+
+```
+uv run dojo test v3a01_window_frames ex8
+```
+@@@FILE ex8/hints.md
+## Hint 1
+
+Three columns want the same visibility: the whole month, from every row.
+Write that frame down in English first — "from the very start to the very
+end" — and then find the two bounds that say it.
+
+## Hint 2
+
+Naming a window looks like this, and the clause goes after `WHERE`/`GROUP
+BY` and before the statement's `ORDER BY`:
+
+```sql
+SELECT category, price,
+       min(price) OVER cat AS cheapest,
+       max(price) OVER cat AS dearest
+FROM products
+WINDOW cat AS (PARTITION BY category)
+ORDER BY category, price;
+```
+
+## Hint 3
+
+There is no `PARTITION BY` in this exercise — the whole 31-row result is one
+partition. So your named window carries an `ORDER BY day` and an explicit
+frame. Decide whether you actually need the `ORDER BY` at all, given the
+frame you are about to write: `first_value` and `last_value` are meaningless
+without one, so the answer is yes, and it is worth knowing why.
+@@@FILE ex8/importantHints.md
+## Hint 1
+
+Write the naive version first, deliberately:
+
+```sql
+first_value(revenue) OVER (ORDER BY day) AS first_day_revenue,
+last_value(revenue)  OVER (ORDER BY day) AS last_day_revenue
+```
+
+Run it. `last_day_revenue` will be a copy of `revenue`. Explain that result
+to yourself in terms of the frame before reading on — the explanation is the
+exercise.
+
+## Hint 2
+
+The explanation: with an `ORDER BY` and no frame clause, the frame is `RANGE
+BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`. On 2023-10-07 the frame is the
+first seven days, and the last value *of those seven days* is 2023-10-07.
+The function is behaving exactly as documented; the default frame is what
+surprised you.
+
+## Hint 3
+
+There are two repairs. One extends the frame to `UNBOUNDED FOLLOWING`. The
+other reverses the sort — `first_value(revenue) OVER (ORDER BY day DESC)` —
+which is correct and which the next reader will misparse. Take the first,
+and notice that once you have written that frame, `sum(revenue)` over the
+same window becomes the month total for free, which is where `pct_of_month`
+comes from. Division of two `numeric` values stays `numeric`, so `round(...,
+2)` needs no cast.
+@@@FILE ex8/solution.sql
+-- v3a01_window_frames / ex8 — one named window, three whole-partition facts.
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1
+)
+SELECT day,
+       revenue,
+       first_value(revenue) OVER month_w AS first_day_revenue,
+       last_value(revenue)  OVER month_w AS last_day_revenue,
+       round(100 * revenue / sum(revenue) OVER month_w, 2) AS pct_of_month
+FROM daily
+WINDOW month_w AS (ORDER BY day
+                   ROWS BETWEEN UNBOUNDED PRECEDING
+                            AND UNBOUNDED FOLLOWING)
+ORDER BY day;
+@@@FILE ex8/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1
+),
+edges AS (
+    SELECT min(day) AS first_day,
+           max(day) AS last_day,
+           sum(revenue) AS month_revenue
+    FROM daily
+)
+SELECT d.day,
+       d.revenue,
+       (SELECT f.revenue FROM daily f WHERE f.day = e.first_day) AS first_day_revenue,
+       (SELECT l.revenue FROM daily l WHERE l.day = e.last_day)  AS last_day_revenue,
+       round(100 * d.revenue / e.month_revenue, 2)               AS pct_of_month
+FROM daily d
+CROSS JOIN edges e
+ORDER BY d.day;
+@@@FILE challenge/prompt.md
+## Challenge — two named windows
+
+Edit `challenge/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)`. October 2023 only
+(`created_at >= '2023-10-01' AND created_at < '2023-11-01'`), rolled up to
+one row per (`day`, `status`). All four statuses — `cancelled`, `paid`,
+`pending`, `shipped` — occur on all 31 days, so the rollup is 124 rows.
+
+Operations wants a per-status daily sheet with three derived columns, and
+two of them need different frames over the *same* partition:
+
+- `status_total` — the whole month's revenue for that status. Same number on
+  all 31 rows of a status.
+- `pct_of_status` — this day's share of that status's month, as a percentage
+  rounded to 2 decimals.
+- `trailing3_revenue` — the sum of this day and the two before it, **within
+  the same status**. The first day of the month has one day in its frame,
+  the second has two.
+
+Illustration for one status over four days (month total 1000.00):
+
+```
+    day     | status | revenue | status_total | pct_of_status | trailing3_revenue
+------------+--------+---------+--------------+---------------+------------------
+ 2023-10-01 | paid   |  100.00 |      1000.00 |         10.00 |            100.00
+ 2023-10-02 | paid   |  200.00 |      1000.00 |         20.00 |            300.00
+ 2023-10-03 | paid   |  300.00 |      1000.00 |         30.00 |            600.00
+ 2023-10-04 | paid   |  400.00 |      1000.00 |         40.00 |            900.00
+```
+
+Note that the trailing sum on 2023-10-04 is 200 + 300 + 400 — it does not
+reach back to a previous status's rows, because the partition boundary stops
+it.
+
+Declare both windows in a `WINDOW` clause. They share a `PARTITION BY` and
+differ in ordering and frame, which is precisely the situation naming was
+invented for.
+
+Columns, in this order: `day` (a `date`), `status`, `revenue`,
+`status_total`, `pct_of_status`, `trailing3_revenue`.
+
+**Ordered by `status` ascending, then `day` ascending.** (124 rows.)
+
+```
+uv run dojo test v3a01_window_frames challenge
+```
+@@@FILE challenge/hints.md
+## Hint 1
+
+Two of the three derived columns come from a window with no ordering at all
+— the whole status — and the third comes from a window that is ordered and
+frame-limited. Same `PARTITION BY`, different everything else.
+
+## Hint 2
+
+The `WINDOW` clause takes a comma-separated list of definitions:
+
+```sql
+WINDOW whole AS (PARTITION BY category),
+       so_far AS (PARTITION BY category ORDER BY id
+                  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+```
+
+Each name is then usable as `OVER whole` / `OVER so_far` anywhere in the
+`SELECT` list.
+
+## Hint 3
+
+Roll up to (`day`, `status`) in a CTE with `GROUP BY 1, 2`, then window over
+those 124 rows. `pct_of_status` divides by the same window aggregate that
+produces `status_total`, so you can either repeat `sum(revenue) OVER whole`
+or wrap the query one more level and divide outside. Both are fine; pick the
+one you would rather read in six months.
+@@@FILE challenge/importantHints.md
+## Hint 1
+
+Sketch the partition first, on paper. 124 rows, four partitions of 31. Now
+answer two questions about the row `2023-10-01 / pending`: how many rows are
+in its `status_total` frame (31), and how many are in its
+`trailing3_revenue` frame (1). Two windows, because those two numbers
+differ.
+
+## Hint 2
+
+The mistake worth avoiding is a single window with an ordering, used for
+both. `sum(revenue) OVER (PARTITION BY status ORDER BY day)` is not the
+status total — the `ORDER BY` installs a cumulative frame, so you would get
+a month-to-date figure and a `pct_of_status` column that climbs to 100. If
+your percentages are cumulative, that is the bug.
+
+## Hint 3
+
+For the trailing window, `ROWS BETWEEN 2 PRECEDING AND CURRENT ROW` and
+`RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW` give the same
+answer here, because every status has a row on every day of the month. They
+would diverge the moment a status went quiet for a day. Choosing between
+them is a statement about which assumption you want the query to encode —
+make it deliberately.
+@@@FILE challenge/solution.sql
+-- v3a01_window_frames / challenge — two named windows over one partition.
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           status,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1, 2
+)
+SELECT day,
+       status,
+       revenue,
+       sum(revenue) OVER whole_status AS status_total,
+       round(100 * revenue / sum(revenue) OVER whole_status, 2) AS pct_of_status,
+       sum(revenue) OVER trailing3    AS trailing3_revenue
+FROM daily
+WINDOW whole_status AS (PARTITION BY status),
+       trailing3    AS (PARTITION BY status ORDER BY day
+                        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)
+ORDER BY status, day;
+@@@FILE challenge/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', created_at)::date AS day,
+           status,
+           sum(total)                          AS revenue
+    FROM orders
+    WHERE created_at >= '2023-10-01'
+      AND created_at <  '2023-11-01'
+    GROUP BY 1, 2
+),
+totals AS (
+    SELECT status, sum(revenue) AS status_total
+    FROM daily
+    GROUP BY status
+)
+SELECT d.day,
+       d.status,
+       d.revenue,
+       t.status_total,
+       round(100 * d.revenue / t.status_total, 2) AS pct_of_status,
+       (SELECT sum(x.revenue)
+          FROM daily x
+         WHERE x.status = d.status
+           AND x.day BETWEEN d.day - 2 AND d.day)  AS trailing3_revenue
+FROM daily d
+JOIN totals t ON t.status = d.status
+ORDER BY d.status, d.day;
+@@@FILE review1/prompt.md
+## Spaced review
+
+Edit `review1/solution.sql`.
+
+Works against `staff(id int, name text, department text, manager_id int,
+salary numeric(10,2), hired_on date)`, restricted to the 98 people in `ops`.
+
+Finance wants a concentration curve for the ops payroll: line the department
+up richest first, and show what percentage of total ops payroll has been
+accounted for by the time you reach each person. The last row is 100.00 by
+construction.
+
+One expression needs two windows with different frames — a cumulative one on
+top, a whole-partition one underneath.
+
+Illustration on four people whose salaries total 200,000:
+
+```
+ id | salary    | cum_pct_of_payroll
+----+-----------+-------------------
+  9 | 100000.00 |              50.00
+  3 |  60000.00 |              80.00
+  7 |  30000.00 |              95.00
+  1 |  10000.00 |             100.00
+```
+
+Ties in `salary` are broken by `id` ascending, in the window *and* in the
+output, so the answer is defined.
+
+Columns, in this order: `id`, `name`, `salary`, `cum_pct_of_payroll` (100 ×
+cumulative salary ÷ total ops payroll, rounded to 2 decimals).
+
+**Ordered by `salary` descending, then `id` ascending.** (98 rows.)
+
+```
+uv run dojo test v3a01_window_frames review1
+```
+@@@FILE review1/hints.md
+## Hint 1
+
+The numerator changes on every row; the denominator does not. Two different
+frames, in one arithmetic expression.
+
+## Hint 2
+
+You have written both halves before. The cumulative half is an ordered
+window with the default frame; the constant half is `OVER ()`. They can
+appear in the same expression:
+
+```sql
+count(*) OVER (ORDER BY hired_on, id) * 100.0 / count(*) OVER ()
+```
+
+## Hint 3
+
+The `WHERE department = 'ops'` filter runs before windowing, so `OVER ()`
+means "the whole ops department", not "the whole company" — worth confirming
+against the last row of your output, which must be exactly `100.00`. The
+decision left to you is the descending sort inside the window: it needs the
+same tie-break as the outer `ORDER BY`, or two people on identical salaries
+get an arbitrary split.
+@@@FILE review1/importantHints.md
+## Hint 1
+
+Check the endpoints first. Whatever query you write, its last row must print
+`100.00` and its first row must print the top earner's share. If the last
+row is not 100, either the denominator is not the department total (did the
+`ops` filter apply to both windows?) or the numerator is not cumulative (is
+there an `ORDER BY` inside the numerator's `OVER`?).
+
+## Hint 2
+
+Consider the failure mode where the column is *flat*: every row shows the
+same percentage. That happens when both windows are unordered — you wrote
+`sum(salary) OVER () / sum(salary) OVER ()` in effect. The cumulative
+behaviour comes only from putting an `ORDER BY` inside the first `OVER`.
+
+## Hint 3
+
+Now the opposite failure: a column that jumps in steps and repeats values
+across people on equal salaries. That is `RANGE`'s peer rule doing its job
+over a non-unique `ORDER BY salary DESC`. Adding `, id` to the window's
+ordering makes every row its own peer group and the curve strictly
+increasing — the same decision you made in ex3, arriving from a different
+direction.
+@@@FILE review1/solution.sql
+-- v3a01_window_frames / review1 — cumulative share of the ops payroll.
+SELECT id,
+       name,
+       salary,
+       round(100 * sum(salary) OVER (ORDER BY salary DESC, id)
+                 / sum(salary) OVER (), 2) AS cum_pct_of_payroll
+FROM staff
+WHERE department = 'ops'
+ORDER BY salary DESC, id;
+@@@FILE review1/expected.sql
+WITH ops AS (
+    SELECT id, name, salary
+    FROM staff
+    WHERE department = 'ops'
+),
+payroll AS (
+    SELECT sum(salary) AS total FROM ops
+)
+SELECT o.id,
+       o.name,
+       o.salary,
+       round(100 * (SELECT sum(x.salary)
+                      FROM ops x
+                     WHERE x.salary > o.salary
+                        OR (x.salary = o.salary AND x.id <= o.id))
+                 / p.total, 2) AS cum_pct_of_payroll
+FROM ops o
+CROSS JOIN payroll p
+ORDER BY o.salary DESC, o.id;

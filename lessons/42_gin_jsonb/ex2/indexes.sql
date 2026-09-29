@@ -1,1 +1,0 @@
--- 42_gin_jsonb/ex2: your GIN index here (jsonb_path_ops; ~1 min build)

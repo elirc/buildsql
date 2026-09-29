@@ -1,0 +1,506 @@
+@@@FILE ex1/prompt.md
+## Exercise 1 — the previous row
+
+Edit `ex1/solution.sql`.
+
+Works against `customers(id int, name text, email text, country text,
+created_at timestamptz)` — 50,000 rows, signups spanning 2021-11-14 to
+2023-11-14.
+
+Growth wants the monthly signup series with the previous month beside each
+row and the change between them. Roll up to one row per month with
+`date_trunc('month', created_at)::date`, then window over those rows.
+
+Illustration on four months:
+
+```
+   month    | new_customers | prev_month | delta
+------------+---------------+------------+-------
+ 2021-11-01 |           620 |            |
+ 2021-12-01 |          1980 |        620 |  1360
+ 2022-01-01 |          2100 |       1980 |   120
+ 2022-02-01 |          1890 |       2100 |  -210
+```
+
+The first row's `prev_month` and `delta` are **empty, not zero**. There is
+no month before the first one, `lag` returns NULL, and arithmetic with NULL
+is NULL. Leave them that way — exercise 2 is about what happens when you do
+not.
+
+Columns, in this order: `month` (a `date`), `new_customers` (that month's
+signup count), `prev_month` (the previous row's `new_customers`, NULL on the
+first row), `delta` (`new_customers` minus `prev_month`, NULL on the first
+row).
+
+**Ordered by `month` ascending.**
+
+```
+uv run dojo test v3a04_lag_lead_periods ex1
+```
+@@@FILE ex1/hints.md
+## Hint 1
+
+You need a value from a different row of the same result. Not an aggregate —
+you are not summarising anything — just a lookup at a fixed offset in window
+order.
+
+## Hint 2
+
+```sql
+lag(revenue) OVER (ORDER BY month) AS prev
+```
+
+reads as "the `revenue` of the row one position earlier when the rows are
+sorted by `month`". With no second argument the offset is 1.
+
+## Hint 3
+
+Aggregate to months in a CTE first, then window over the monthly rows. For
+the `delta` you can either repeat the `lag` call inside a subtraction, or
+compute `prev` in one query level and subtract in the next. The decision
+left to you is which of those you would rather read in six months — both
+produce identical plans, because PostgreSQL evaluates each distinct window
+expression once.
+@@@FILE ex1/importantHints.md
+## Hint 1
+
+Predict the row count and the NULLs before you run anything. Signups span
+two years and a day, so the series has 25 monthly rows. Exactly one row —
+the first — has a NULL `prev_month`, and exactly one has a NULL `delta`. If
+your result has zeroes there instead, something in your query decided to be
+helpful.
+
+## Hint 2
+
+The wrong shape to watch for is windowing the raw table:
+
+```sql
+SELECT created_at, lag(created_at) OVER (ORDER BY created_at) FROM customers;
+```
+
+That answers "how long between consecutive signups", which is a different
+and much larger report. The grain of this one is a month, so the `GROUP BY`
+has to happen before the window does.
+
+## Hint 3
+
+If your `delta` column is NULL on *every* row, the two windows disagree —
+usually because one of them orders by `created_at` and the other by `month`,
+or because the `lag` is computed in an inner query and subtracted in an
+outer one that re-sorted the rows. A window's `ORDER BY` is independent of
+the statement's; make sure the one that matters says `month`.
+@@@FILE ex1/solution.sql
+-- v3a04_lag_lead_periods / ex1 — monthly signups against the previous month.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)                              AS new_customers
+    FROM customers
+    GROUP BY 1
+)
+SELECT month,
+       new_customers,
+       lag(new_customers) OVER (ORDER BY month)                 AS prev_month,
+       new_customers - lag(new_customers) OVER (ORDER BY month) AS delta
+FROM monthly
+ORDER BY month;
+@@@FILE ex1/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)                              AS new_customers
+    FROM customers
+    GROUP BY 1
+)
+SELECT m.month,
+       m.new_customers,
+       p.new_customers                    AS prev_month,
+       m.new_customers - p.new_customers  AS delta
+FROM monthly m
+LEFT JOIN monthly p ON p.month = m.month - INTERVAL '1 month'
+ORDER BY m.month;
+@@@FILE ex2/prompt.md
+## Exercise 2 — the default that lies
+
+Edit `ex2/solution.sql`.
+
+Works against the same monthly signup series as exercise 1: `customers(id
+int, name text, email text, country text, created_at timestamptz)`, rolled
+up with `date_trunc('month', created_at)::date`.
+
+`lag` takes an optional third argument — the value to use when there is no
+row at that offset. This exercise puts the defaulted and undefaulted
+versions side by side so you can see exactly what the convenience costs.
+
+Illustration on the first three months:
+
+```
+   month    | new_customers | prev_null | prev_zero | delta_null | delta_zero
+------------+---------------+-----------+-----------+------------+-----------
+ 2021-11-01 |           620 |           |         0 |            |        620
+ 2021-12-01 |          1980 |       620 |       620 |       1360 |       1360
+ 2022-01-01 |          2100 |      1980 |      1980 |        120 |        120
+```
+
+The two versions agree everywhere except the first row, and on that row they
+disagree completely: `delta_null` says "no comparison available",
+`delta_zero` says "we grew by 620 from nothing". The second statement is
+false — the month before was not zero, it was outside the data. A chart
+built on `delta_zero` opens with a spike that is entirely an artefact.
+
+Columns, in this order: `month` (a `date`), `new_customers`, `prev_null`
+(`lag` with no default), `prev_zero` (`lag` with a default of `0`),
+`delta_null` (`new_customers - prev_null`), `delta_zero` (`new_customers -
+prev_zero`).
+
+**Ordered by `month` ascending.**
+
+```
+uv run dojo test v3a04_lag_lead_periods ex2
+```
+@@@FILE ex2/hints.md
+## Hint 1
+
+One function, two call shapes. The only difference is an extra argument that
+is consulted exclusively at the edge of the partition.
+
+## Hint 2
+
+The three-argument form is `lag(expression, offset, default)`:
+
+```sql
+lag(price, 1, 0)      -- previous row's price, or 0 if there is none
+lead(price, 1, price) -- next row's price, or this row's if there is none
+```
+
+The offset must be given explicitly when you supply a default; there is no
+two-argument form that skips it.
+
+## Hint 3
+
+The default's type must be compatible with the expression's. `new_customers`
+is a `bigint` (it comes from `count(*)`), so the literal `0` is fine —
+PostgreSQL will promote it. Watch what happens to the difference columns:
+one of them has a NULL on the first row and one has a number, and that
+divergence is the entire output of this exercise.
+@@@FILE ex2/importantHints.md
+## Hint 1
+
+Answer a question before writing: on which rows can the two `prev` columns
+possibly differ? Only where `lag` has no row to return, which is exactly the
+first row of the partition. Every other row ignores the default entirely.
+That single row is what you are studying.
+
+## Hint 2
+
+Now the judgement, because this is really an exercise about when to use the
+feature. `lag(x, 1, 0)` is honest when zero is genuinely the prior value: an
+account balance before the first transaction, a cumulative counter, an
+inventory level before the first delivery. It is dishonest when the prior
+value is unknown rather than zero — which is the situation whenever your
+data window starts before your business did.
+
+## Hint 3
+
+A related trap that is not in this exercise but is worth knowing: some
+people write `coalesce(lag(x) OVER w, 0)` instead of `lag(x, 1, 0) OVER w`.
+Those are *not* equivalent. The `coalesce` version also replaces a genuine
+NULL in the data — a month where `new_customers` was itself NULL — while the
+`lag` default only fires at the partition edge. If your source column can be
+NULL, that difference is a bug waiting.
+@@@FILE ex2/solution.sql
+-- v3a04_lag_lead_periods / ex2 — the edge default, with and without.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)                              AS new_customers
+    FROM customers
+    GROUP BY 1
+)
+SELECT month,
+       new_customers,
+       lag(new_customers)       OVER (ORDER BY month) AS prev_null,
+       lag(new_customers, 1, 0) OVER (ORDER BY month) AS prev_zero,
+       new_customers - lag(new_customers)       OVER (ORDER BY month) AS delta_null,
+       new_customers - lag(new_customers, 1, 0) OVER (ORDER BY month) AS delta_zero
+FROM monthly
+ORDER BY month;
+@@@FILE ex2/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           count(*)                              AS new_customers
+    FROM customers
+    GROUP BY 1
+),
+with_prev AS (
+    SELECT month,
+           new_customers,
+           lag(new_customers) OVER (ORDER BY month) AS prev_null
+    FROM monthly
+)
+SELECT month,
+       new_customers,
+       prev_null,
+       coalesce(prev_null, 0)                 AS prev_zero,
+       new_customers - prev_null              AS delta_null,
+       new_customers - coalesce(prev_null, 0) AS delta_zero
+FROM with_prev
+ORDER BY month;
+@@@FILE ex3/prompt.md
+## Exercise 3 — percent change, safely
+
+Edit `ex3/solution.sql`.
+
+Works against `events(id bigint, customer_id int, event_type text, payload
+jsonb, ts timestamptz)` — 3,000,000 rows, one per second, spanning
+2023-10-11 to 2023-11-14. Restrict to `event_type = 'purchase'` and roll up
+to one row per day with `date_trunc('day', ts)::date`.
+
+Growth wants the day-over-day percentage change. That means dividing by the
+previous day's count — and a denominator that can be zero is a query that
+can fail outright, because `numeric` division by zero raises an error rather
+than returning NULL or infinity. Guard it with `nullif`.
+
+Illustration of the rule, with a hypothetical zero day inserted so you can
+see what the guard is for (the real series has purchases every day, so the
+`nullif` never fires — which is exactly why it is easy to forget until the
+day it matters):
+
+```
+    day     | purchases | prev_day | pct_change
+------------+-----------+----------+-----------
+ 2023-10-11 |      4100 |          |
+ 2023-10-12 |      6600 |     4100 |      60.98
+ 2023-10-13 |      5200 |     6600 |     -21.21
+ 2023-10-14 |         0 |     5200 |    -100.00
+ 2023-10-15 |      3300 |        0 |
+```
+
+The last row is the one that matters. Its previous day was zero, so the
+percentage is undefined; `nullif(prev_day, 0)` turns the denominator into
+NULL and the whole expression into NULL instead of raising an error.
+
+Columns, in this order: `day` (a `date`), `purchases` (that day's count),
+`prev_day` (the previous row's count, NULL on the first row), `pct_change`
+(100 × (`purchases` − `prev_day`) ÷ `prev_day`, rounded to 2 decimals, NULL
+where `prev_day` is NULL or zero).
+
+**Ordered by `day` ascending.**
+
+```
+uv run dojo test v3a04_lag_lead_periods ex3
+```
+@@@FILE ex3/hints.md
+## Hint 1
+
+Three columns, two of them straightforward. The third is a fraction, and the
+interesting part is what you do about the denominator rather than the
+arithmetic.
+
+## Hint 2
+
+```sql
+round(100 * (x - prev) / nullif(prev, 0), 2)
+```
+
+`nullif(a, b)` returns NULL when `a = b`, and `a` otherwise. Dividing by
+NULL gives NULL; dividing by zero gives an error. That is the entire
+difference.
+
+## Hint 3
+
+Computing `prev` once in a CTE and doing the percentage in the outer query
+makes this much easier to read than nesting three `lag` calls inside one
+expression. `count(*)` is a `bigint`, so `100 * (x - prev)` is `bigint` and
+the division by a `bigint` would be *integer division* — losing the
+fraction entirely. The decision left to you is where to introduce a numeric:
+multiply by `100.0`, or cast one operand. Check your output against the
+illustration's decimals.
+@@@FILE ex3/importantHints.md
+## Hint 1
+
+Start with the failure. Write the percentage without `nullif` and reason
+about what happens if the series ever contains a zero day: PostgreSQL raises
+`division by zero` and the query returns nothing at all. Not a NULL, not a
+row — an error. A report that dies on legitimate data is worse than one that
+shows a blank.
+
+## Hint 2
+
+Now the second, quieter failure. `count(*)` returns `bigint`, and `bigint /
+bigint` in PostgreSQL is integer division that truncates towards zero. So
+this:
+
+```sql
+round(100 * (purchases - prev_day) / nullif(prev_day, 0), 2)
+```
+
+gives you whole numbers with `.00` after them — the rounding cannot restore
+a fraction that was already thrown away. Introduce a numeric before the
+division, not after it.
+
+## Hint 3
+
+A useful check on your answer: on a row where `purchases` and `prev_day` are
+equal, `pct_change` must be exactly `0.00`. On a row where `purchases` is
+zero and `prev_day` is not, it must be exactly `-100.00`. Two rows, and they
+between them prove the sign, the scale and the integer-division question.
+@@@FILE ex3/solution.sql
+-- v3a04_lag_lead_periods / ex3 — day-over-day percent change with a guarded divisor.
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day,
+           count(*)                    AS purchases
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY 1
+),
+with_prev AS (
+    SELECT day,
+           purchases,
+           lag(purchases) OVER (ORDER BY day) AS prev_day
+    FROM daily
+)
+SELECT day,
+       purchases,
+       prev_day,
+       round(100.0 * (purchases - prev_day) / nullif(prev_day, 0), 2) AS pct_change
+FROM with_prev
+ORDER BY day;
+@@@FILE ex3/expected.sql
+WITH daily AS (
+    SELECT date_trunc('day', ts)::date AS day,
+           count(*)                    AS purchases
+    FROM events
+    WHERE event_type = 'purchase'
+    GROUP BY 1
+)
+SELECT d.day,
+       d.purchases,
+       p.purchases AS prev_day,
+       CASE WHEN p.purchases IS NULL OR p.purchases = 0 THEN NULL
+            ELSE round((d.purchases - p.purchases)::numeric * 100
+                       / p.purchases, 2)
+       END AS pct_change
+FROM daily d
+LEFT JOIN daily p ON p.day = d.day - 1
+ORDER BY d.day;
+@@@FILE ex4/prompt.md
+## Exercise 4 — twelve rows back
+
+Edit `ex4/solution.sql`.
+
+Works against `orders(id int, customer_id int, status text, total
+numeric(10,2), created_at timestamptz)` — 500,000 rows spanning 2022-11-14
+to 2023-11-14. Roll up to one row per month over the **whole** table, which
+gives thirteen monthly rows: November 2022 through November 2023.
+
+Finance wants a year-over-year column. With one row per month, "a year ago"
+is twelve rows back — so `lag(revenue, 12)`.
+
+Thirteen months means exactly **one** row can have a year-ago comparison:
+the last one. Every other row's `revenue_12m_ago` is NULL, and that is the
+correct answer, not a bug. It is also the most useful thing this exercise
+teaches: a year-over-year report needs more than a year of data, and a
+report that silently shows twelve NULLs is telling you something true.
+
+Illustration on the first and last rows of such a series:
+
+```
+   month    | revenue     | revenue_12m_ago | yoy_delta
+------------+-------------+-----------------+------------
+ 2022-11-01 | 19100000.00 |                 |
+ 2022-12-01 | 41800000.00 |                 |
+ ...        |             |                 |
+ 2023-11-01 | 20400000.00 |     19100000.00 | 1300000.00
+```
+
+Note also what the offset really means. `lag(revenue, 12)` is *twelve rows*,
+not twelve months. It is a year-ago comparison only because this rollup
+happens to contain every month with no gaps. On a series with a missing
+month it would compare against thirteen months ago and say nothing about it.
+
+Columns, in this order: `month` (a `date`), `revenue` (that month's total),
+`revenue_12m_ago`, `yoy_delta` (`revenue` minus `revenue_12m_ago`).
+
+**Ordered by `month` ascending.** (13 rows.)
+
+```
+uv run dojo test v3a04_lag_lead_periods ex4
+```
+@@@FILE ex4/hints.md
+## Hint 1
+
+Same shape as exercise 1, one argument different. The offset is a row count,
+and you need to decide what row count corresponds to "a year" for this
+particular rollup.
+
+## Hint 2
+
+```sql
+lag(revenue, 12) OVER (ORDER BY month)
+```
+
+The second argument is the number of rows to look back. `lag(x)` and
+`lag(x, 1)` are the same thing.
+
+## Hint 3
+
+No filter on `created_at` — the report covers the whole table, which is what
+gives you thirteen months rather than eleven. The decision left to you is
+whether to trust the offset at all: writing the same query as a `LEFT JOIN`
+on `p.month = m.month - INTERVAL '1 year'` compares by value instead of
+position, produces identical output here, and would keep producing correct
+output on a series with holes. Know both.
+@@@FILE ex4/importantHints.md
+## Hint 1
+
+Count first. The orders table spans 2022-11-14 to 2023-11-14, so
+`date_trunc('month', ...)` produces months from 2022-11-01 to 2023-11-01
+inclusive — thirteen of them. Twelve rows back from row 13 is row 1. Rows 1
+through 12 have nothing twelve back, so they are NULL. If your result has
+more than one non-NULL `revenue_12m_ago`, you have more rows than you should
+and probably a filter you did not intend.
+
+## Hint 2
+
+Notice which two rows are being compared: November 2022 and November 2023.
+Both are *partial* months — the data starts on 14 November 2022 and ends on
+14 November 2023 — so their revenues are roughly half of a normal month's,
+and the year-over-year delta between them is comparing two half-months. The
+arithmetic is right and the report is misleading. Real year-over-year
+reports exclude incomplete periods, and noticing that is worth more than the
+query.
+
+## Hint 3
+
+If you want to see the fragility for yourself, run the query with `WHERE
+created_at < '2023-06-01' OR created_at >= '2023-07-01'` to delete June from
+the series. The rollup drops to twelve rows, `lag(revenue, 12)` returns NULL
+everywhere, and nothing warns you. Then run the `LEFT JOIN`-on-month-value
+version against the same data: still NULL, but for a reason you can see in
+the join condition. That is the argument for the join shape.
+@@@FILE ex4/solution.sql
+-- v3a04_lag_lead_periods / ex4 — year-over-year by row offset.
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           sum(total)                            AS revenue
+    FROM orders
+    GROUP BY 1
+)
+SELECT month,
+       revenue,
+       lag(revenue, 12) OVER (ORDER BY month)           AS revenue_12m_ago,
+       revenue - lag(revenue, 12) OVER (ORDER BY month) AS yoy_delta
+FROM monthly
+ORDER BY month;
+@@@FILE ex4/expected.sql
+WITH monthly AS (
+    SELECT date_trunc('month', created_at)::date AS month,
+           sum(total)                            AS revenue
+    FROM orders
+    GROUP BY 1
+)
+SELECT m.month,
+       m.revenue,
+       p.revenue             AS revenue_12m_ago,
+       m.revenue - p.revenue AS yoy_delta
+FROM monthly m
+LEFT JOIN monthly p ON p.month = m.month - INTERVAL '1 year'
+ORDER BY m.month;
