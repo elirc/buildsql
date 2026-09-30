@@ -1,5 +1,7 @@
 # IPSKILL: build reliable CRUD behavior while studying six tracks
 
+**Continue with the [expanded learning path](advanced/README.md): guided checkpoints, worked traces, debugging labs, independent exercises, solutions and a capstone.**
+
 This course follows the application in this repository. IPSKILL contains a preserved learning archive with 310 lessons and 2,155 missions across SQL, TypeScript, Node, React, C# and .NET. The browser presents that archive, records your written self-review, schedules recall, and tracks applied CRUD projects. It does not contain all the source workspaces or execute the commands mentioned in archived lessons. A button click is evidence that you recorded a decision, not evidence that a compiler accepted a solution.
 
 Start with the root [setup guide](../README.md), then create an empty local workspace in a disposable browser profile. The application uses IndexedDB in that browser. There is no account, shared backend or cloud synchronization. Keep your regular work in its existing profile and use exports when transferring between profiles or origins. Changing a localhost port changes the storage origin, so an apparently empty workspace on a new port does not demonstrate that old data disappeared.

@@ -1,4 +1,6 @@
-﻿# IPSKILL: six-track curriculum and applied CRUD practice
+# IPSKILL: six-track curriculum and applied CRUD practice
+
+**Continue with the [expanded learning path](astraupskill/advanced/README.md): guided checkpoints, worked traces, debugging labs, independent exercises, solutions and a capstone.**
 
 **This is IPSKILL, a React app.** It displays a SQL/TS/Node/React/C#/.NET lesson archive; it is not itself a SQL course, despite the folder name `buildsql`.
 

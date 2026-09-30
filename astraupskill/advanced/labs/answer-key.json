@@ -1,0 +1,13 @@
+{
+  "BSQL-P1": false,
+  "BSQL-P2": 3,
+  "BSQL-P3": 8,
+  "BSQL-P4": false,
+  "BSQL-P5": {
+    "sameIdentity": false,
+    "revision": 0
+  },
+  "BSQL-P6": 1,
+  "BSQL-P7": false,
+  "BSQL-P8": false
+}
