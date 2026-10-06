@@ -4,7 +4,7 @@ The application passed 69 distinct checks on September 9, 2026: 28 domain and pr
 
 ## Recorded command outcomes
 
-| Gate | Outcome | Evidence in central `checks/buildsql` |
+| Gate | Outcome | Evidence file (kept in the organizer's central `checks/buildsql` folder, not in this repo) |
 | --- | --- | --- |
 | Locked dependency installation | Exit 0; 259 packages installed | `install-01-execution.json` |
 | TypeScript | Exit 0 | `typecheck-03-execution.json` |
@@ -47,3 +47,13 @@ Browser evidence on one Windows machine cannot establish all-browser support, fu
 ## Final screenshot and delivery evidence
 
 The refined browser-02 run passed all 19 scenarios again, exiting 0 in 181.31 seconds against the same production build. All nine delivered screenshots come from that run and were visually inspected. The rejected form capture now keeps the sticky navigation at the top; the three responsive form images show the actual form at 1440, 800 and 390 pixel viewport widths. Labels, inputs and actions remain visible, with no horizontal overflow detected. The long final-list image documents the accepted 13 projects and pagination after reload; use the focused form images for close reading. All eight original public/content JSON files were compared against their baseline SHA-256 hashes and remain byte-identical. Aggregate results total 69 distinct scenarios; reruns are retained as provenance, not added to that count.
+
+## Status note (2026-10-06, documentation refresh)
+
+This record above is a historical report of the September 9 runs and was not re-executed. During the refresh, from a fresh clone and without installing dependencies:
+
+- Test counts were recounted from source and still match: 28 `it` blocks in `src/game.test.ts`, 4 in `src/App.test.tsx`, and 11 in `src/content.test.ts` (one index test, one per track for the six tracks, four rejection tests) — 43 in total. The authoring runner still registers 7 `check(...)` calls and the browser runner 19 `record(...)` calls. The suite itself was not run.
+- `src/catalog.json` has 2,155 missions across 310 distinct lessons, matching the archive totals quoted throughout the course.
+- `python astraupskill/advanced/labs/check-answers.py astraupskill/advanced/labs/answer-key.json` prints `8/8` and exits 0.
+- The project and evidence rules used by the exercises (stale version rejection, 20-character goal, 40/80-character evidence boundaries, case-insensitive duplicate titles, legacy save import to schema 2) were confirmed by executing the real `src/contracts.ts`, `src/progression.ts` and `src/storage.ts` after stripping types with Node 22.16's `stripTypeScriptTypes`, outside the repo.
+- The evidence JSON/log files named in the table and the `reportsfile/` aggregate referred to elsewhere are not part of this repository.

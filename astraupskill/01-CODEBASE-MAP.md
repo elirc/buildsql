@@ -6,7 +6,7 @@ The important boundaries are:
 
 | File                        | Responsibility                                                 | Question to ask while reading                            |
 | --------------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
-| `src/App.tsx`               | Routing, the workspace hook, and view selection (about 400 lines after the fix pass) | Which view owns which piece of state?                    |
+| `src/App.tsx`               | Routing, the workspace hook, and view selection (449 lines) | Which view owns which piece of state?                    |
 | `src/views/*.tsx`           | `HomeView`, `JourneyView`, `MissionView`, `ReviewsView`, `WorldCard`; `shared.tsx` holds the helpers they share | What does each view read from the workspace, and what does it write back? |
 | `src/PracticeView.tsx`      | Controlled project form, list, search, filter and pagination   | What happens to input after rejection?                   |
 | `src/progression.ts`        | Mission completion, recall, project create/update/delete rules | Which state changes are allowed?                         |
@@ -20,6 +20,18 @@ The important boundaries are:
 Trace a project creation using these concrete stages. A title typed into Project title first exists in the PracticeView form. Applying the form calls `putProject`. That function validates the existing workspace, creates a project identity and version, normalizes the title, and validates the resulting aggregate. The UI then passes the valid result to the workspace draft. No IndexedDB write has occurred yet.
 
 Save workspace calls the hook's `save`, which calls `commit`. The store reads the current accepted document inside a readwrite transaction. It compares that document's identity and revision with the caller's expectation. Only a matching expectation permits the candidate write. The promise resolves from transaction completion; the hook then updates its accepted expectation and clears the dirty indicator. Locate every one of those transitions in source.
+
+The same path with line numbers, so you can set breakpoints:
+
+| Step | Code | What to observe |
+| --- | --- | --- |
+| Submit the form | `apply` in `src/PracticeView.tsx:57-69` | `event.preventDefault()`, then `putProject(workspace, input, version)`; `setForm(null)` runs only if that call did not throw |
+| Domain rule | `putProject` in `src/progression.ts:157-185` | version check at 165-172, trim + version bump at 173-180, whole-workspace `validateWorkspace` at 184 |
+| Draft update | `onChange={workspace.edit}` at `src/App.tsx:437` → `edit` in `src/useWorkspace.ts:95-109` | sets `working.current`, `draft` and `dirty`; no storage call |
+| Visible state | `src/App.tsx:293-294` | toolbar reads "Unsaved changes" vs "Accepted locally" and shows `revision` |
+| Save click | `save` in `src/useWorkspace.ts:135-148` | calls `commit(db, working.current, expected.current)` |
+| Conditional write | `commit` in `src/storage.ts:95-173` | identity/revision comparison at 121-128 inside the readwrite transaction opened at 108; `put` at 162; resolves on `tx.oncomplete` at 167 |
+| Acknowledge | `accept` in `src/useWorkspace.ts:128-134` | the returned workspace becomes the new `expected`; `dirty` clears |
 
 Now trace an edit. The form holds the project version that was opened. `putProject` checks that version before producing the next project version. Later, saving the whole draft checks the workspace revision. These are related but different boundaries: one protects a project editing operation inside the local draft, while the other protects the entire accepted document against another tab.
 

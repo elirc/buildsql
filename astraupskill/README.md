@@ -1,10 +1,18 @@
 # IPSKILL: build reliable CRUD behavior while studying six tracks
 
-**Continue with the [expanded learning path](advanced/README.md): guided checkpoints, worked traces, debugging labs, independent exercises, solutions and a capstone.**
+Despite the repository name, this is not a SQL course and contains no database server or pytest grader. IPSKILL is a React 19 + TypeScript + Vite app that displays a preserved archive (6 tracks, 310 lessons, 2,155 missions — `src/catalog.json` has 2,155 entries across 310 lessons) and keeps a local practice workspace in IndexedDB. This course is about that app: how an edit travels from a form, through validation, into a draft, and finally into an accepted IndexedDB transaction. A mission-completion click records your written self-review; it does not run or grade code.
 
-This course follows the application in this repository. IPSKILL contains a preserved learning archive with 310 lessons and 2,155 missions across SQL, TypeScript, Node, React, C# and .NET. The browser presents that archive, records your written self-review, schedules recall, and tracks applied CRUD projects. It does not contain all the source workspaces or execute the commands mentioned in archived lessons. A button click is evidence that you recorded a decision, not evidence that a compiler accepted a solution.
+Set up with the root [README](../README.md) (`npm ci`, `npm run dev`, then `http://127.0.0.1:5187`) and use a disposable browser profile. Storage is per origin, so a different port shows an empty workspace without anything having been lost.
 
-Start with the root [setup guide](../README.md), then create an empty local workspace in a disposable browser profile. The application uses IndexedDB in that browser. There is no account, shared backend or cloud synchronization. Keep your regular work in its existing profile and use exports when transferring between profiles or origins. Changing a localhost port changes the storage origin, so an apparently empty workspace on a new port does not demonstrate that old data disappeared.
+## Which part of this folder to read
+
+The material comes in three tiers that cover the same app at increasing depth. Do the core first; the later tiers point back to it rather than repeating it.
+
+| Tier | Where | Use it for |
+| --- | --- | --- |
+| Core | the numbered files below | the source tour, one worked change, graded exercises with checks |
+| Advanced | [advanced/](advanced/README.md) | a session-by-session route, debugging labs, and an install-free prediction checker (`advanced/labs/check-answers.py`) |
+| Workbook | [advanced/extended-course/](advanced/extended-course/README.md) | 33 essay chapters for deeper reading; chapters 24-28 and 31 are capstones built **outside** this repo |
 
 Follow these files in order:
 
@@ -12,10 +20,11 @@ Follow these files in order:
 2. [Concepts](02-CONCEPTS.md): distinguish drafts, project versions, workspace revisions and identities.
 3. [Worked change](03-WORKED-CHANGE.md): implement a review-ready practice project with rejected-path evidence.
 4. [Testing and debugging](04-TESTING-AND-DEBUGGING.md): investigate the layer that actually failed.
-5. [Practice tickets](05-PRACTICE.md): extend the application in progressively harder steps.
+5. [Practice](05-PRACTICE.md): six exercises, easy to hard, each with a Goal and a Check.
 6. [Solutions and review](06-SOLUTIONS-AND-REVIEW.md): assess behavior and tradeoffs.
 7. [Trace lab](07-TRACE-LAB.md): explain successful and rejected operations without guessing.
-8. [Verification](VERIFICATION.md): separate executed checks from planned checks and practical limits.
+8. [Backend ticket](08-BACKEND-TICKET.md): a reference Express + `node:sqlite` contacts API for the exercises that need a server (not part of this repo).
+9. [Verification](VERIFICATION.md): separate executed checks from planned checks and practical limits.
 
 For your first session, open CRUD practice and create a project called Contact book. Write a goal such as: “Create, list, edit and delete contacts while rejecting a duplicate email and retaining the rejected form.” Apply the form to the workspace draft. Observe that the list changes while the toolbar still says unsaved. Click Save workspace, wait for the saved revision, then reload. Explain the difference between those two buttons before implementing a new feature.
 
@@ -29,7 +38,7 @@ The old application is retained under [docs/original](../docs/original/src__App.
 
 ## Prerequisites and glossary
 
-**Prerequisites:** React components with `useState` and controlled inputs; TypeScript interfaces and unions; promises that can reject; enough data modelling to know a duplicate email should be refused. The `buildwhiteboard` course here is a natural predecessor.
+**Prerequisites:** React components with `useState` and controlled inputs; TypeScript interfaces and unions; promises that can reject; enough data modelling to know a duplicate email should be refused.
 
 | term | meaning | where in this project |
 | --- | --- | --- |

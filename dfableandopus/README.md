@@ -12,11 +12,12 @@ TypeScript, React 19, Vite, Vitest and IndexedDB, with no server. Chapter `astra
 
 ## Two weeks
 
+Only two of the planned files exist in this folder; the rest of the plan uses material already in `astraupskill/`.
+
 - Days 1-3: [01-INTERVIEW-QUESTIONS.md](01-INTERVIEW-QUESTIONS.md) with `src/contracts.ts` and `src/storage.ts` open.
 - Days 4-5: [02-STORIES-AND-RESUME.md](02-STORIES-AND-RESUME.md).
-- Days 6-8: [03-CODE-READING-DRILL.md](03-CODE-READING-DRILL.md), cold and timed.
-- Days 9-11: [04-TAKE-HOME.md](04-TAKE-HOME.md), graded with its own rubric.
-- Days 12-13: [05-SYSTEM-DESIGN-FOLLOWUPS.md](05-SYSTEM-DESIGN-FOLLOWUPS.md) at a whiteboard.
-- Every day: [06-FLASHCARDS.md](06-FLASHCARDS.md).
+- Days 6-8: code reading, cold and timed — the step table in [01-CODEBASE-MAP.md](../astraupskill/01-CODEBASE-MAP.md) and the trace lab in [07-TRACE-LAB.md](../astraupskill/07-TRACE-LAB.md).
+- Days 9-11: a take-home — Exercise 4 or 5 in [05-PRACTICE.md](../astraupskill/05-PRACTICE.md), graded with [06-SOLUTIONS-AND-REVIEW.md](../astraupskill/06-SOLUTIONS-AND-REVIEW.md).
+- Days 12-13: system-design follow-ups — [08-BACKEND-TICKET.md](../astraupskill/08-BACKEND-TICKET.md) and extended-course chapters 26-28.
 
 Run the tests with `npx vitest run` from the project root; the suite uses a 30-second correctness timeout because parsing the full SQL pack exceeds Vitest's five-second default on a normal laptop.

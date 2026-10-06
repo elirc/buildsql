@@ -1,6 +1,33 @@
 # Review behavior, evidence and tradeoffs
 
-This guide provides expected reasoning for the practice tickets without pretending that one code fragment solves every implementation detail. A reviewer should be able to understand the product trigger, the resulting behavior and the evidence without reading your chat history. Lead with a concrete example: “When a filter reduces thirteen projects to two, the list now moves to the first valid page.” Then explain the small change that makes that behavior reliable.
+This guide provides expected reasoning for the practice exercises without pretending that one code fragment solves every implementation detail. A reviewer should be able to understand the product trigger, the resulting behavior and the evidence without reading your chat history. Lead with a concrete example: “When a filter reduces thirteen projects to two, the list now moves to the first valid page.” Then explain the small change that makes that behavior reliable.
+
+## Exercise answers
+
+**Exercise 1.** The key is `advanced/labs/answer-key.json`: P1 `false`, P2 `3`, P3 `8`, P4 `false`, P5 `{ "sameIdentity": false, "revision": 0 }`, P6 `1`, P7 `false`, P8 `false`. Running the checker against the key itself prints `8/8` and exits 0, which is how this answer was confirmed.
+
+**Exercise 2.** Apply changes only the in-memory draft (`edit`), so a reload re-reads accepted storage and the project is absent. Save runs `commit`, which writes revision 1 inside a transaction and resolves on `oncomplete`; only then does reload show it.
+
+**Exercise 3.** One possible test:
+
+```ts
+it("pins the review and completion evidence boundaries", () => {
+  const base = newWorkspace();
+  const make = (status: "review" | "complete", n: number) =>
+    putProject(base, { ...project(), status, evidence: "x".repeat(n) }, undefined, now);
+  expect(() => make("review", 39)).toThrow(/Review evidence/);
+  expect(make("review", 40).projects[0].status).toBe("review");
+  expect(make("complete", 80).projects[0].status).toBe("complete");
+});
+```
+
+These boundaries were confirmed by executing the real `putProject` from a type-stripped copy of `src/` (39 → "Review evidence must contain 40 to 10000 valid characters.", 40 accepted, 79 rejected, 80 accepted).
+
+**Exercise 4.** The change is three lines plus a `<select>`: `const [pageSize, setPageSize] = useState(10)`, use `pageSize` in the `Math.ceil` at line 55 and in the `slice` at line 224, and on change call `setPageSize(n); setPage(1)` (the simplest defensible policy). The form state is separate (`form`), so changing size cannot discard an edit. The review discussion below covers the reasoning.
+
+**Exercises 5 and 6.** Use the reasoning sections below; there is no single code answer.
+
+## Review reasoning
 
 For page size, derive the visible slice from the filtered collection. Compute the page count after filtering, with a minimum of one page for an empty collection. Clamp the current page before taking the slice. Keep page size within an explicit set. A test that only checks that a dropdown changes its own value is weak; a test that checks the actual item identities on the second page is useful. Keep form state separate from pagination so changing a view preference cannot discard an unfinished edit.
 
@@ -22,7 +49,7 @@ Compare your implementation with the current [storage boundary](../src/storage.t
 
 ## The compare-and-update this project actually ships
 
-`src/progression.ts:157` is the local equivalent of the versioned update described below: the expected version is compared against the stored one *before* any new value is built, and the increment happens in the same returned workspace rather than in a later write.
+`src/progression.ts:157` is the local equivalent of the versioned update described above: the expected version is compared against the stored one *before* any new value is built, and the increment happens in the same returned workspace rather than in a later write.
 
 ```ts
 export function putProject(

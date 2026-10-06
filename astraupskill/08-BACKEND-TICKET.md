@@ -1,8 +1,10 @@
-# 08. Backend ticket: the contacts API behind practice ticket 3
+# 08. Backend ticket: the contacts API behind practice Exercise 6
 
 [Course index](README.md)
 
-Practice ticket 3 asks for a real backend. This chapter scaffolds it so the course's ideas (expected versions, rejected-write UX, shared validation) reach Node. Everything here runs with Node 22 and no packages except Express; the schema is SQLite via `node:sqlite`.
+Practice Exercise 6 asks for a real backend. This chapter scaffolds it so the course's ideas (expected versions, rejected-write UX, validation at the boundary) reach Node. **None of these files exist in this repo** — create them in a separate practice project. You need Node 22.16+ (where `node:sqlite` loads without a flag but prints an `ExperimentalWarning`), `express`, and, for the tests, `supertest`.
+
+What was actually checked for this chapter: the schema and the case-insensitive unique index were executed with `node:sqlite` on Node 22.16 (a second insert differing only in case fails with `UNIQUE constraint failed: index ...`, which is what the router's `includes('UNIQUE')` relies on), and an `UPDATE ... WHERE id = ? AND version = ?` that matches nothing returns `changes: 0`. The Express router and the test were not run.
 
 ## Schema (`api/schema.sql`)
 
@@ -24,7 +26,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS contacts_email_ci ON contacts (lower(email));
 ```js
 import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
-import { validateContact } from '../src/contracts.js';        // shared validation: the same rules the React form uses
+
+// IPSKILL's src/contracts.ts has no contact validator; write your own, in the same style as validateProject.
+export function validateContact(body) {
+  const errors = [];
+  if (typeof body?.name !== 'string' || body.name.trim().length < 1 || body.name.length > 120) errors.push('name must be 1-120 characters');
+  if (typeof body?.email !== 'string' || !/^[^\s@]+@[^\s@]+$/.test(body.email)) errors.push('email must look like an address');
+  if (!['planned', 'active', 'complete'].includes(body?.status)) errors.push('status must be planned, active or complete');
+  return errors;
+}
 
 export function contactsRouter(db) {
   const r = Router();
@@ -71,6 +81,18 @@ export function contactsRouter(db) {
 ## Reference integration test for the 409 (`api/contacts.test.js`, node:test + supertest)
 
 ```js
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import express from 'express';
+import request from 'supertest';
+import { DatabaseSync } from 'node:sqlite';
+import { readFileSync } from 'node:fs';
+import { contactsRouter } from './contacts.js';
+
+const db = new DatabaseSync(':memory:');
+db.exec(readFileSync(new URL('./schema.sql', import.meta.url), 'utf8'));
+const app = express().use(express.json()).use('/contacts', contactsRouter(db));
+
 test('a stale If-Match is refused and the row is unchanged', async () => {
   const created = await request(app).post('/contacts').send({ name: 'Ada', email: 'ada@example.com', status: 'planned' }).expect(201);
   await request(app).put(`/contacts/${created.body.id}`).set('If-Match', '"1"').send({ ...created.body, name: 'Ada L.' }).expect(200);
@@ -81,4 +103,4 @@ test('a stale If-Match is refused and the row is unchanged', async () => {
 });
 ```
 
-Add the other four (400 from the shared validator, 409 on a duplicate email differing only by case, 428 without `If-Match`, 404 after delete) and connect `PracticeView` to it: the form's rejected-write UX (keep the draft, show the message) is unchanged, only the acceptance moves to the server.
+Add the other four (400 from `validateContact`, 409 on a duplicate email differing only by case, 428 without `If-Match`, 404 after delete) and connect `PracticeView` to it: the form's rejected-write UX (keep the draft, show the message) is unchanged, only the acceptance moves to the server.

@@ -6,7 +6,7 @@
 
 IPSKILL is a local React and TypeScript learning workspace. It preserves 310 lessons and 2,155 missions across SQL, TypeScript, Node, React, C# and .NET, with explicit progress saves, recall scheduling, an archive and a CRUD practice-project tracker.
 
-Start the detailed junior-to-mid-level course at [astraupskill/README.md](astraupskill/README.md). It includes a source tour, a worked change, examples, failure investigations, five applied tickets and review guidance. Check [the dated verification record](astraupskill/VERIFICATION.md) for actual completed checks and limits.
+Start the detailed junior-to-mid-level course at [astraupskill/README.md](astraupskill/README.md). It includes a source tour, a worked change, examples, failure investigations, six graded exercises and review guidance. Check [the dated verification record](astraupskill/VERIFICATION.md) for actual completed checks and limits.
 
 ## Local setup
 

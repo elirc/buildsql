@@ -50,4 +50,4 @@ Start with the [earlier advanced path](../README.md) for a shorter introduction,
 
 For each investigation record the starting state, action, prediction, observation, source function, and remaining uncertainty. Distinguish source traces, simulated examples, executed tests and proposals. Use disposable browser data for failure experiments and a separate practice project for backend capstones. Preserve learner answers and existing work.
 
-The workbook is locally authored and its source links are checked. It does not claim that all proposed capstones or browser experiments have been executed. The organizer's `reportsfile/tenfold/buildsql.json` records the measured content and verification scope.
+The workbook is locally authored and its source links are checked. It does not claim that all proposed capstones or browser experiments have been executed. Executed checks and their limits are recorded in the core [verification record](../../VERIFICATION.md).
